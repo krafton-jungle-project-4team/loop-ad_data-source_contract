@@ -1,31 +1,8 @@
 name: loop-ad_data-source_contract
 
 services:
-  kafka:
-    image: apache/kafka:3.9.0
-    ports:
-      - "${KAFKA_EXTERNAL_PORT:?KAFKA_EXTERNAL_PORT is required}:9094"
-    environment:
-      KAFKA_CLUSTER_ID: "${KAFKA_CLUSTER_ID:?KAFKA_CLUSTER_ID is required}"
-      KAFKA_SCRAM_USERNAME: "${KAFKA_SCRAM_USERNAME:?KAFKA_SCRAM_USERNAME is required}"
-      KAFKA_SCRAM_PASSWORD: "${KAFKA_SCRAM_PASSWORD:?KAFKA_SCRAM_PASSWORD is required}"
-    volumes:
-      - kafka-data:/var/lib/kafka/data
-      - ./kafka/server.properties:/etc/kafka/local/server.properties:ro
-    command:
-      - bash
-      - -lc
-      - |
-        grep -v '^advertised.listeners=' /etc/kafka/local/server.properties > /tmp/kafka-format.properties
-        /opt/kafka/bin/kafka-storage.sh format \
-          --ignore-formatted \
-          --cluster-id "$$KAFKA_CLUSTER_ID" \
-          --config /tmp/kafka-format.properties \
-          --add-scram "SCRAM-SHA-512=[name=$$KAFKA_SCRAM_USERNAME,password=$$KAFKA_SCRAM_PASSWORD]"
-        exec /opt/kafka/bin/kafka-server-start.sh /etc/kafka/local/server.properties
-
   postgres:
-    image: "${POSTGRES_IMAGE:-postgres:16.13-alpine}"
+    image: postgres:16.13-alpine
     ports:
       - "${POSTGRES_PORT:?POSTGRES_PORT is required}:5432"
     environment:
@@ -35,10 +12,9 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./postgres/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
-      - ./postgres/dummy.sql:/docker-entrypoint-initdb.d/02-dummy.sql:ro
 
   clickhouse:
-    image: "${CLICKHOUSE_IMAGE:-clickhouse/clickhouse-server:26.3.13.31}"
+    image: clickhouse/clickhouse-server:26.3.13.31
     ports:
       - "${CLICKHOUSE_HTTP_PORT:?CLICKHOUSE_HTTP_PORT is required}:8123"
       - "${CLICKHOUSE_NATIVE_PORT:?CLICKHOUSE_NATIVE_PORT is required}:9000"
@@ -52,6 +28,5 @@ services:
       - ./clickhouse/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
 
 volumes:
-  kafka-data:
   postgres-data:
   clickhouse-data:
