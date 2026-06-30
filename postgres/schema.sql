@@ -741,3 +741,55 @@ WHERE m.is_active = true
   AND now() >= m.valid_from
   AND (m.valid_until IS NULL OR now() < m.valid_until)
   AND c.generation_status IN ('generated', 'approved');
+
+-- =========================================================
+-- pgvector extension
+-- Required for segment embedding / centroid matching.
+-- =========================================================
+
+CREATE EXTENSION IF NOT EXISTS vector;
+
+
+-- =========================================================
+-- Segment Matching Configs
+-- Per-day embedding version and similarity threshold.
+-- =========================================================
+
+CREATE TABLE IF NOT EXISTS segment_matching_configs (
+    id BIGSERIAL PRIMARY KEY,
+    project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    analysis_date DATE NOT NULL,
+    embedding_version TEXT NOT NULL DEFAULT 'segment_match_v1',
+    similarity_threshold NUMERIC(5,4) NOT NULL DEFAULT 0.7000,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    UNIQUE (project_id, analysis_date)
+);
+
+
+-- =========================================================
+-- Segment Centroids
+-- Daily segment embedding vectors for user → segment matching.
+-- =========================================================
+
+CREATE TABLE IF NOT EXISTS segment_centroids (
+    id BIGSERIAL PRIMARY KEY,
+    project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    segment_id BIGINT NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+    analysis_date DATE NOT NULL,
+    embedding_version TEXT NOT NULL DEFAULT 'segment_match_v1',
+    centroid vector(64) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    UNIQUE (project_id, segment_id, analysis_date, embedding_version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_segment_centroids_cleanup
+ON segment_centroids (project_id, analysis_date, embedding_version);
+
+-- Optional. Enable only if the PostgreSQL/pgvector version supports HNSW.
+-- CREATE INDEX IF NOT EXISTS idx_segment_centroids_hnsw
+-- ON segment_centroids
+-- USING hnsw (centroid vector_cosine_ops);
