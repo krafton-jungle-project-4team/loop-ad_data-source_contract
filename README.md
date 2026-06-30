@@ -63,3 +63,4 @@ docker compose --env-file environments/local.env up -d
 - 이 repo에는 schema contract와 로컬 실행 설정만 둡니다.
 - shell script, dummy data, 팀원별 자동화는 repo 공통 계약에 포함하지 않습니다.
 - 추가 데이터 소스나 seed가 필요해지면 별도 합의 후 파일을 추가합니다.
+- 광고 serving 앱은 `active_ad_serving_rules` view를 읽습니다. 이 view는 렌더링 필드와 함께 ClickHouse 추적용 `mapping_id`, `action_id`, `experiment_id`, `experiment_variant_id`, `generated_content_id`를 제공합니다.

@@ -699,6 +699,7 @@ ORDER BY m.project_id, m.external_user_id, m.analysis_date DESC, m.created_at DE
 
 CREATE OR REPLACE VIEW active_ad_serving_rules AS
 SELECT
+    m.id AS mapping_id,
     m.project_id,
     m.segment_id,
     s.segment_key,
@@ -707,11 +708,12 @@ SELECT
 
     m.placement_key,
 
-    m.experiment_id,
+    COALESCE(m.experiment_id, ev.experiment_id) AS experiment_id,
     m.experiment_variant_id,
     ev.variant_key,
+    COALESCE(e.recommendation_action_id, c.recommendation_action_id) AS action_id,
 
-    m.generated_content_id,
+    COALESCE(m.generated_content_id, ev.generated_content_id) AS generated_content_id,
     c.content_type,
     c.title,
     c.body,
@@ -731,8 +733,11 @@ JOIN segments s
     ON s.id = m.segment_id
 LEFT JOIN experiment_variants ev
     ON ev.id = m.experiment_variant_id
+LEFT JOIN experiments e
+    ON e.id = COALESCE(m.experiment_id, ev.experiment_id)
 LEFT JOIN generated_contents c
-    ON c.id = m.generated_content_id
+    ON c.id = COALESCE(m.generated_content_id, ev.generated_content_id)
 WHERE m.is_active = true
   AND now() >= m.valid_from
-  AND (m.valid_until IS NULL OR now() < m.valid_until);
+  AND (m.valid_until IS NULL OR now() < m.valid_until)
+  AND c.generation_status IN ('generated', 'approved');
