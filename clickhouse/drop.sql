@@ -1,0 +1,3 @@
+DROP DATABASE IF EXISTS loopad SYNC;
+
+DROP NAMED COLLECTION IF EXISTS loopad_events_kafka;

@@ -1,8 +1,6 @@
 -- Named collection loopad_events_kafka -> loopad.events.
 -- events_raw_kafka는 저장하지 않는 Kafka source table이고, events가 영구 저장 테이블이다.
 
-CREATE DATABASE IF NOT EXISTS loopad;
-
 USE loopad;
 
 CREATE TABLE IF NOT EXISTS events
