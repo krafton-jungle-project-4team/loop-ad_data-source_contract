@@ -2,13 +2,16 @@
 
 LoopAd의 로컬 데이터 소스 계약을 공유하는 최소 repo입니다.
 
-이 repo는 운영 migration history나 seed data를 관리하지 않습니다. 현재 기준 파일은 PostgreSQL과 ClickHouse의 schema뿐입니다.
+이 repo는 운영 migration history나 seed data를 관리하지 않습니다. 현재 기준 파일은 PostgreSQL과 ClickHouse의 SQL contract입니다.
 
 ## 구조
 
 ```text
 .
 ├── clickhouse/
+│   ├── database.sql
+│   ├── drop.sql
+│   ├── named-collection.example.sql
 │   └── schema.sql
 ├── postgres/
 │   └── schema.sql
@@ -50,6 +53,13 @@ docker compose --env-file environments/local.env up -d
 ```
 
 PostgreSQL은 `postgres/schema.sql`, ClickHouse는 `clickhouse/schema.sql`을 컨테이너 최초 초기화 시점에 실행합니다.
+
+## ClickHouse SQL
+
+- [clickhouse/drop.sql](clickhouse/drop.sql): dev ClickHouse를 깨끗하게 다시 만들 때 `loopad` database와 Kafka named collection을 제거합니다.
+- [clickhouse/database.sql](clickhouse/database.sql): ClickHouse `loopad` database를 생성합니다.
+- [clickhouse/named-collection.example.sql](clickhouse/named-collection.example.sql): `loopad_events_kafka` named collection 생성 예시입니다.
+- [clickhouse/schema.sql](clickhouse/schema.sql): 이벤트 저장 테이블, Kafka source table, materialized view를 생성합니다.
 
 스키마 변경 후 깨끗한 로컬 DB가 필요하면 Docker volume을 지운 뒤 다시 올립니다.
 
