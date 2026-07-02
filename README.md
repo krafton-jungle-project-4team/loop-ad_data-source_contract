@@ -37,11 +37,6 @@ LoopAd의 로컬 데이터 소스 계약을 공유하는 최소 repo입니다.
 
 ```bash
 LOOPAD_POSTGRES_URL=postgresql://loopad:loopad@localhost:15432/loopad
-LOOPAD_AURORA_HOST=localhost
-LOOPAD_AURORA_PORT=15432
-LOOPAD_AURORA_DATABASE=loopad
-LOOPAD_AURORA_USERNAME=loopad
-LOOPAD_AURORA_PASSWORD=loopad
 LOOPAD_CLICKHOUSE_URL=http://localhost:18123
 LOOPAD_CLICKHOUSE_DATABASE=loopad
 LOOPAD_CLICKHOUSE_USERNAME=loopad_app
