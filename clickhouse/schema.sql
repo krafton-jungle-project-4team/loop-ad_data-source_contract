@@ -12,6 +12,9 @@
 --   - 64-dimensional user behavior vectors
 -- =========================================================
 
+CREATE DATABASE IF NOT EXISTS loopad;
+USE loopad;
+
 -- =========================================================
 -- 0. Raw Events
 -- Collector/Kafka consumer stores original hotel_rec_promo.v1 envelope here.
@@ -249,7 +252,7 @@ CREATE TABLE IF NOT EXISTS event_validation_errors
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(event_date)
-ORDER BY (event_date, project_id, event_name, error_code);
+ORDER BY (event_date, ifNull(project_id, ''), ifNull(event_name, ''), error_code);
 
 -- =========================================================
 -- 7. Hotel Detail Events View
