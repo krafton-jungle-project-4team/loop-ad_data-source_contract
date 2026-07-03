@@ -1,1152 +1,1095 @@
 -- =========================================================
--- Loop-Ad AI Decision Dummy / Seed Data
+-- Loop-Ad PostgreSQL Dummy / Seed Data
 -- =========================================================
 --
 -- This file is intentionally separated from schema.sql.
 -- Run schema.sql first, then dummy.sql.
 --
 -- dummy.sql includes:
---   1. demo-shop project
---   2. action_catalog seed
---   3. default segment/content/mapping fallback
---   4. sample normal segment with metrics only
---   5. sample anomalous segment with recommendation/content/experiment/mapping
+--   1. demo-shop project / campaign / promotion
+--   2. segment preview, saved segment definitions, funnel setup
+--   3. ChatKit session/action examples
+--   4. Decision analysis, vectors, target segments, generation output
+--   5. promotion run, ad experiments, evaluations
+--   6. active ad serving assignments, dispatch jobs, redirects
+--   7. sample event validation errors
 --
--- It is designed to be idempotent where practical.
--- Running it multiple times should not create duplicate default serving rules.
+-- It refreshes only rows under project_id = 'demo-shop'.
 --
 -- =========================================================
 
--- =========================================================
--- 1. Demo project
--- =========================================================
-
-INSERT INTO projects (project_key, name, timezone)
-VALUES ('demo-shop', 'Demo Shopping Mall', 'Asia/Seoul')
-ON CONFLICT (project_key) DO UPDATE
-SET
-    name = EXCLUDED.name,
-    timezone = EXCLUDED.timezone;
+BEGIN;
 
 -- =========================================================
--- 2. Action catalog
+-- 0. Refresh previous demo-shop seed rows
+-- Delete in FK dependency order.
 -- =========================================================
 
-INSERT INTO action_catalog (
-    action_key,
+DELETE FROM event_validation_errors
+WHERE project_id = 'demo-shop';
+
+DELETE FROM redirect_links
+WHERE project_id = 'demo-shop';
+
+DELETE FROM ad_dispatch_jobs
+WHERE project_id = 'demo-shop';
+
+DELETE FROM user_segment_assignments
+WHERE project_id = 'demo-shop';
+
+DELETE FROM promotion_evaluations
+WHERE project_id = 'demo-shop';
+
+DELETE FROM ad_experiments
+WHERE project_id = 'demo-shop';
+
+DELETE FROM promotion_target_segments
+WHERE project_id = 'demo-shop';
+
+DELETE FROM segment_vectors
+WHERE project_id = 'demo-shop';
+
+DELETE FROM promotion_runs
+WHERE project_id = 'demo-shop';
+
+DELETE FROM content_candidates
+WHERE project_id = 'demo-shop';
+
+DELETE FROM generation_runs
+WHERE project_id = 'demo-shop';
+
+DELETE FROM promotion_analyses
+WHERE project_id = 'demo-shop';
+
+DELETE FROM ai_action_runs
+WHERE project_id = 'demo-shop';
+
+DELETE FROM ai_chat_messages
+WHERE chat_session_id IN (
+    SELECT chat_session_id
+    FROM ai_chat_sessions
+    WHERE project_id = 'demo-shop'
+);
+
+DELETE FROM ai_chat_sessions
+WHERE project_id = 'demo-shop';
+
+DELETE FROM funnel_steps
+WHERE funnel_id IN (
+    SELECT funnel_id
+    FROM funnel_definitions
+    WHERE project_id = 'demo-shop'
+);
+
+DELETE FROM funnel_definitions
+WHERE project_id = 'demo-shop';
+
+DELETE FROM segment_definitions
+WHERE project_id = 'demo-shop';
+
+DELETE FROM segment_query_previews
+WHERE project_id = 'demo-shop';
+
+DELETE FROM promotions
+WHERE project_id = 'demo-shop';
+
+DELETE FROM campaigns
+WHERE project_id = 'demo-shop';
+
+DELETE FROM projects
+WHERE project_id = 'demo-shop';
+
+-- =========================================================
+-- 1. Project / Campaign / Promotion
+-- =========================================================
+
+INSERT INTO projects (
+    project_id,
+    project_name,
+    domain,
+    write_key,
+    industry,
+    status,
+    created_at,
+    updated_at
+)
+VALUES (
+    'demo-shop',
+    'Demo Hotel Booking',
+    'demo.loop-ad.local',
+    'wk_demo_local',
+    'hotel_booking',
+    'active',
+    TIMESTAMPTZ '2026-07-01 00:00:00+09',
+    TIMESTAMPTZ '2026-07-01 00:00:00+09'
+);
+
+INSERT INTO campaigns (
+    campaign_id,
+    project_id,
     name,
-    description,
-    target_funnel_step,
-    default_channel,
-    template_json
+    objective,
+    target_audience,
+    start_date,
+    end_date,
+    primary_metric,
+    status,
+    created_at,
+    updated_at
+)
+VALUES (
+    'cmp_summer_family_2026',
+    'demo-shop',
+    'Summer Family Hotel Boost',
+    'Increase booking conversion for hotel detail visitors during summer travel demand.',
+    'existing_users',
+    DATE '2026-07-01',
+    DATE '2026-08-31',
+    'booking_conversion_rate',
+    'active',
+    TIMESTAMPTZ '2026-07-01 09:00:00+09',
+    TIMESTAMPTZ '2026-07-03 09:00:00+09'
+);
+
+INSERT INTO promotions (
+    promotion_id,
+    project_id,
+    campaign_id,
+    channel,
+    marketing_theme,
+    target_audience,
+    goal_metric,
+    goal_target_value,
+    goal_basis,
+    min_sample_size,
+    max_loop_count,
+    message_brief,
+    offer_type,
+    landing_url,
+    landing_type,
+    budget_json,
+    metadata_json,
+    status,
+    created_at,
+    updated_at
+)
+VALUES (
+    'promo_family_breakfast',
+    'demo-shop',
+    'cmp_summer_family_2026',
+    'onsite_banner',
+    'summer_family_trip',
+    'existing_users',
+    'booking_conversion_rate',
+    0.085000,
+    'promotion_average',
+    100,
+    3,
+    'Promote breakfast-included family rooms to users comparing hotel detail pages.',
+    'free_breakfast',
+    '/promotions/family-breakfast',
+    'hotel_detail_page',
+    '{"daily_budget_krw": 500000, "max_cpa_krw": 28000}'::jsonb,
+    '{"seed_source": "postgres/dummy.sql", "owner": "dashboard-demo"}'::jsonb,
+    'running',
+    TIMESTAMPTZ '2026-07-01 09:20:00+09',
+    TIMESTAMPTZ '2026-07-03 10:10:00+09'
+);
+
+-- =========================================================
+-- 2. Segment query previews / definitions
+-- =========================================================
+
+INSERT INTO segment_query_previews (
+    query_preview_id,
+    project_id,
+    created_by,
+    natural_language_query,
+    generated_sql,
+    query_params_json,
+    base_time_from,
+    base_time_to,
+    sample_size,
+    total_eligible_user_count,
+    sample_ratio,
+    sample_size_status,
+    result_columns_json,
+    result_preview_json,
+    status,
+    created_at
 )
 VALUES
 (
-    'highlight_benefit_banner',
-    '혜택 강조 배너',
-    '상품 상세 또는 리스트에서 할인, 무료배송, 리뷰 등 구매 유도 요소를 강조한다.',
-    'view_to_cart',
-    'banner',
-    '{"content_type": "banner", "cta_label": "혜택 보기"}'::jsonb
+    'preview_family_trip',
+    'demo-shop',
+    'operator-demo',
+    'Users searching for rooms for at least two adults and one child within the next 14 days.',
+    'SELECT user_id FROM hotel_marketing_profiles WHERE srch_children_cnt > 0 AND days_until_checkin BETWEEN 0 AND 14',
+    '{"days_until_checkin_max": 14, "min_children": 1}'::jsonb,
+    TIMESTAMPTZ '2026-07-01 00:00:00+09',
+    TIMESTAMPTZ '2026-07-03 00:00:00+09',
+    1840,
+    92000,
+    0.020000,
+    'valid',
+    '[{"name":"user_id","type":"string"},{"name":"hotel_cluster","type":"uint8"}]'::jsonb,
+    '[{"user_id":"user_family_001","hotel_cluster":41},{"user_id":"user_family_002","hotel_cluster":41}]'::jsonb,
+    'saved',
+    TIMESTAMPTZ '2026-07-02 09:00:00+09'
 ),
 (
-    'cart_coupon_banner',
-    '장바구니 쿠폰 배너',
-    '장바구니 단계에서 무료배송 또는 할인 쿠폰을 노출한다.',
-    'cart_to_checkout',
-    'banner',
-    '{"content_type": "coupon_banner", "cta_label": "쿠폰 받기"}'::jsonb
-),
-(
-    'checkout_coupon_banner',
-    '결제 직전 전환 쿠폰',
-    '결제 직전 이탈이 높은 세그먼트에게 제한 시간 쿠폰 또는 마감 임박 메시지를 노출한다.',
-    'checkout_to_purchase',
-    'banner',
-    '{"content_type": "coupon_banner", "cta_label": "지금 구매하기"}'::jsonb
-),
-(
-    'alternative_product_banner',
-    '대체 상품 추천 배너',
-    '품절 또는 관심 상품 이탈이 높은 세그먼트에게 대체 상품을 추천한다.',
-    'view_to_cart',
-    'banner',
-    '{"content_type": "product_recommendation_banner", "cta_label": "대체 상품 보기"}'::jsonb
-)
-ON CONFLICT (action_key) DO UPDATE
-SET
-    name = EXCLUDED.name,
-    description = EXCLUDED.description,
-    target_funnel_step = EXCLUDED.target_funnel_step,
-    default_channel = EXCLUDED.default_channel,
-    template_json = EXCLUDED.template_json,
-    is_active = true;
+    'preview_near_checkin',
+    'demo-shop',
+    'operator-demo',
+    'Mobile users with check-in date within seven days who viewed hotel detail pages.',
+    'SELECT user_id FROM hotel_marketing_profiles WHERE is_mobile = 1 AND days_until_checkin BETWEEN 0 AND 7',
+    '{"days_until_checkin_max": 7, "device_type": "mobile"}'::jsonb,
+    TIMESTAMPTZ '2026-07-01 00:00:00+09',
+    TIMESTAMPTZ '2026-07-03 00:00:00+09',
+    1265,
+    92000,
+    0.013750,
+    'valid',
+    '[{"name":"user_id","type":"string"},{"name":"days_until_checkin","type":"int32"}]'::jsonb,
+    '[{"user_id":"user_mobile_001","days_until_checkin":2},{"user_id":"user_mobile_002","days_until_checkin":5}]'::jsonb,
+    'saved',
+    TIMESTAMPTZ '2026-07-02 09:10:00+09'
+);
 
--- =========================================================
--- 3. Dummy decision run
--- This run acts as the source run for sample rows below.
--- =========================================================
-
-INSERT INTO decision_runs (
+INSERT INTO segment_definitions (
+    segment_id,
     project_id,
-    run_type,
-    trigger_source,
-    requested_by,
-    idempotency_key,
-    mode,
-    force,
-    analysis_date,
-    window_start,
-    window_end,
-    baseline_start,
-    baseline_end,
-    status,
-    metadata,
-    started_at,
-    finished_at
-)
-SELECT
-    p.id,
-    'manual_api',
-    'api',
-    'dummy-seed',
-    'dummy-2021-01-04',
-    'demo',
-    true,
-    DATE '2021-01-04',
-    TIMESTAMPTZ '2021-01-04 00:00:00+09',
-    TIMESTAMPTZ '2021-01-05 00:00:00+09',
-    TIMESTAMPTZ '2021-01-01 00:00:00+09',
-    TIMESTAMPTZ '2021-01-04 00:00:00+09',
-    'success',
-    '{"source": "dummy.sql", "purpose": "dashboard_and_ad_server_development"}'::jsonb,
-    now() - interval '5 minutes',
-    now() - interval '4 minutes'
-FROM projects p
-WHERE p.project_key = 'demo-shop'
-ON CONFLICT (project_id, idempotency_key)
-WHERE idempotency_key IS NOT NULL
-DO UPDATE
-SET
-    status = 'success',
-    metadata = EXCLUDED.metadata,
-    finished_at = now();
-
--- =========================================================
--- 4. Default segment
--- =========================================================
-
-INSERT INTO segments (
-    project_id,
-    segment_key,
-    name,
-    description,
+    segment_name,
+    source,
+    query_preview_id,
+    natural_language_query,
+    generated_sql,
     rule_json,
+    profile_json,
+    sample_size,
+    total_eligible_user_count,
+    sample_ratio,
     status,
-    is_default,
-    created_run_id
+    created_at,
+    updated_at
 )
-SELECT
-    p.id,
-    'default',
-    '전체 사용자 기본 세그먼트',
-    '세그먼트별 추천 광고가 없을 때 사용하는 기본 fallback 세그먼트',
-    '{"type": "default", "matches": "all"}'::jsonb,
+VALUES
+(
+    'seg_existing_all',
+    'demo-shop',
+    'All Existing Users',
+    'system_default',
+    NULL,
+    'Fallback segment for every active user.',
+    'SELECT user_id FROM users WHERE status = ''active''',
+    '{"type":"default","matches":"all"}'::jsonb,
+    '{"primary_segment":"seg_existing_all"}'::jsonb,
+    92000,
+    92000,
+    1.000000,
     'active',
+    TIMESTAMPTZ '2026-07-01 09:00:00+09',
+    TIMESTAMPTZ '2026-07-01 09:00:00+09'
+),
+(
+    'seg_family_trip',
+    'demo-shop',
+    'Family Trip Planners',
+    'custom_chatkit',
+    'preview_family_trip',
+    'Users searching for rooms for at least two adults and one child within the next 14 days.',
+    'SELECT user_id FROM hotel_marketing_profiles WHERE srch_children_cnt > 0 AND days_until_checkin BETWEEN 0 AND 14',
+    '{"srch_children_cnt":{"gte":1},"days_until_checkin":{"between":[0,14]}}'::jsonb,
+    '{"trip_type":"family","dominant_device":"mobile","top_hotel_cluster":41}'::jsonb,
+    1840,
+    92000,
+    0.020000,
+    'active',
+    TIMESTAMPTZ '2026-07-02 09:05:00+09',
+    TIMESTAMPTZ '2026-07-02 09:05:00+09'
+),
+(
+    'seg_near_checkin_mobile',
+    'demo-shop',
+    'Near Check-in Mobile Users',
+    'custom_chatkit',
+    'preview_near_checkin',
+    'Mobile users with check-in date within seven days who viewed hotel detail pages.',
+    'SELECT user_id FROM hotel_marketing_profiles WHERE is_mobile = 1 AND days_until_checkin BETWEEN 0 AND 7',
+    '{"is_mobile":1,"days_until_checkin":{"between":[0,7]}}'::jsonb,
+    '{"trip_type":"last_minute","dominant_device":"mobile","price_sensitivity":"high"}'::jsonb,
+    1265,
+    92000,
+    0.013750,
+    'active',
+    TIMESTAMPTZ '2026-07-02 09:15:00+09',
+    TIMESTAMPTZ '2026-07-02 09:15:00+09'
+);
+
+-- =========================================================
+-- 3. Funnel setup
+-- =========================================================
+
+INSERT INTO funnel_definitions (
+    funnel_id,
+    project_id,
+    campaign_id,
+    promotion_id,
+    funnel_name,
+    domain_type,
+    channel,
+    landing_type,
+    status,
+    created_at,
+    updated_at
+)
+VALUES (
+    'funnel_family_booking',
+    'demo-shop',
+    'cmp_summer_family_2026',
+    'promo_family_breakfast',
+    'Hotel Detail to Booking Complete',
+    'hotel_booking',
+    'onsite_banner',
+    'hotel_detail_page',
+    'active',
+    TIMESTAMPTZ '2026-07-02 09:30:00+09',
+    TIMESTAMPTZ '2026-07-02 09:30:00+09'
+);
+
+INSERT INTO funnel_steps (
+    funnel_id,
+    step_order,
+    step_name,
+    event_name,
+    condition_json,
+    created_at
+)
+VALUES
+('funnel_family_booking', 1, 'Promotion Impression', 'promotion_impression', '{"channel":"onsite_banner"}'::jsonb, TIMESTAMPTZ '2026-07-02 09:30:00+09'),
+('funnel_family_booking', 2, 'Promotion Click', 'promotion_click', '{"channel":"onsite_banner"}'::jsonb, TIMESTAMPTZ '2026-07-02 09:30:00+09'),
+('funnel_family_booking', 3, 'Campaign Landing', 'campaign_landing', '{"landing_type":"hotel_detail_page"}'::jsonb, TIMESTAMPTZ '2026-07-02 09:30:00+09'),
+('funnel_family_booking', 4, 'Booking Start', 'booking_start', '{}'::jsonb, TIMESTAMPTZ '2026-07-02 09:30:00+09'),
+('funnel_family_booking', 5, 'Booking Complete', 'booking_complete', '{}'::jsonb, TIMESTAMPTZ '2026-07-02 09:30:00+09');
+
+-- =========================================================
+-- 4. ChatKit session / messages / action run
+-- =========================================================
+
+INSERT INTO ai_chat_sessions (
+    chat_session_id,
+    project_id,
+    user_id,
+    chatkit_thread_id,
+    context_json,
+    status,
+    created_at,
+    updated_at
+)
+VALUES (
+    'chat_demo_family_segment',
+    'demo-shop',
+    'operator-demo',
+    'thread_demo_family_segment',
+    '{"campaign_id":"cmp_summer_family_2026","promotion_id":"promo_family_breakfast"}'::jsonb,
+    'closed',
+    TIMESTAMPTZ '2026-07-02 08:50:00+09',
+    TIMESTAMPTZ '2026-07-02 09:20:00+09'
+);
+
+INSERT INTO ai_chat_messages (
+    chat_session_id,
+    role,
+    content,
+    metadata_json,
+    created_at
+)
+VALUES
+(
+    'chat_demo_family_segment',
+    'user',
+    'Find hotel users likely to book family rooms soon.',
+    '{"seed_source":"postgres/dummy.sql"}'::jsonb,
+    TIMESTAMPTZ '2026-07-02 08:51:00+09'
+),
+(
+    'chat_demo_family_segment',
+    'assistant',
+    'I found a family trip segment with valid sample size and saved it for this promotion.',
+    '{"query_preview_id":"preview_family_trip","segment_id":"seg_family_trip"}'::jsonb,
+    TIMESTAMPTZ '2026-07-02 08:53:00+09'
+);
+
+INSERT INTO ai_action_runs (
+    action_run_id,
+    chat_session_id,
+    project_id,
+    action_type,
+    input_json,
+    output_json,
+    requires_confirmation,
+    confirmed_at,
+    status,
+    created_at,
+    updated_at
+)
+VALUES (
+    'action_create_family_segment',
+    'chat_demo_family_segment',
+    'demo-shop',
+    'create_segment_definition',
+    '{"natural_language_query":"Users searching family rooms within 14 days"}'::jsonb,
+    '{"query_preview_id":"preview_family_trip","segment_id":"seg_family_trip"}'::jsonb,
     true,
-    r.id
-FROM projects p
-JOIN decision_runs r
-  ON r.project_id = p.id
- AND r.idempotency_key = 'dummy-2021-01-04'
-WHERE p.project_key = 'demo-shop'
-ON CONFLICT (project_id, segment_key) DO UPDATE
-SET
-    name = EXCLUDED.name,
-    description = EXCLUDED.description,
-    rule_json = EXCLUDED.rule_json,
-    status = 'active',
-    is_default = true,
-    updated_at = now();
+    TIMESTAMPTZ '2026-07-02 08:58:00+09',
+    'completed',
+    TIMESTAMPTZ '2026-07-02 08:55:00+09',
+    TIMESTAMPTZ '2026-07-02 09:05:00+09'
+);
 
 -- =========================================================
--- 5. Default generated content
+-- 5. Decision analysis / vectors / selected target segments
 -- =========================================================
 
-INSERT INTO generated_contents (
+INSERT INTO promotion_analyses (
+    analysis_id,
+    project_id,
+    campaign_id,
+    promotion_id,
+    focus_segment_ids_json,
+    operator_instruction,
+    input_snapshot_json,
+    profile_summary_json,
+    output_json,
+    status,
+    created_at,
+    updated_at
+)
+VALUES (
+    'analysis_family_breakfast_001',
+    'demo-shop',
+    'cmp_summer_family_2026',
+    'promo_family_breakfast',
+    '["seg_family_trip","seg_near_checkin_mobile"]'::jsonb,
+    'Prioritize segments that are close to booking and likely to respond to breakfast value.',
+    '{"window_start":"2026-07-01T00:00:00+09:00","window_end":"2026-07-03T00:00:00+09:00"}'::jsonb,
+    '{"segments_analyzed":2,"dominant_signal":"hotel_detail_view_to_booking_start_drop"}'::jsonb,
+    '{"recommended_segments":["seg_family_trip","seg_near_checkin_mobile"],"confidence":0.84}'::jsonb,
+    'completed',
+    TIMESTAMPTZ '2026-07-02 10:00:00+09',
+    TIMESTAMPTZ '2026-07-02 10:07:00+09'
+);
+
+INSERT INTO segment_vectors (
+    segment_vector_id,
     project_id,
     segment_id,
-    recommendation_action_id,
-    content_type,
-    variant_key,
-    title,
-    body,
-    cta_label,
-    landing_url,
-    image_url,
-    media_s3_key,
-    image_prompt,
-    generation_model,
-    generation_status,
-    metadata,
-    created_run_id
+    promotion_id,
+    promotion_run_id,
+    analysis_id,
+    vector_dim,
+    vector_values,
+    vector_version,
+    source,
+    created_at
 )
 SELECT
-    p.id,
-    s.id,
+    v.segment_vector_id,
+    'demo-shop',
+    v.segment_id,
+    'promo_family_breakfast',
     NULL,
-    'banner',
-    'default',
-    '오늘의 인기 상품을 확인해보세요',
-    '고객님을 위한 추천 상품과 특별 혜택을 준비했습니다.',
-    '추천 상품 보기',
-    '/collections/recommended',
-    '/static/banners/default-main-banner.png',
-    NULL,
-    'clean ecommerce promotional banner for popular products',
-    'seed',
-    'approved',
-    '{"source": "dummy.sql", "purpose": "default_fallback"}'::jsonb,
-    r.id
-FROM projects p
-JOIN segments s
-  ON s.project_id = p.id
- AND s.segment_key = 'default'
-JOIN decision_runs r
-  ON r.project_id = p.id
- AND r.idempotency_key = 'dummy-2021-01-04'
-WHERE p.project_key = 'demo-shop'
-ON CONFLICT (project_id, segment_id, variant_key)
-WHERE recommendation_action_id IS NULL
-DO UPDATE
-SET
-    title = EXCLUDED.title,
-    body = EXCLUDED.body,
-    cta_label = EXCLUDED.cta_label,
-    landing_url = EXCLUDED.landing_url,
-    image_url = EXCLUDED.image_url,
-    image_prompt = EXCLUDED.image_prompt,
-    generation_model = 'seed',
-    generation_status = 'approved',
-    metadata = EXCLUDED.metadata,
-    updated_at = now();
-
--- =========================================================
--- 6. Default ad mapping
--- =========================================================
-
-INSERT INTO segment_ad_mappings (
-    project_id,
-    segment_id,
-    placement_key,
-    experiment_id,
-    experiment_variant_id,
-    generated_content_id,
-    traffic_weight,
-    is_active,
-    is_winner,
-    priority,
-    created_run_id
-)
-SELECT
-    p.id,
-    s.id,
-    'main_banner',
-    NULL,
-    NULL,
-    c.id,
-    1.0,
-    true,
-    true,
-    0,
-    r.id
-FROM projects p
-JOIN segments s
-  ON s.project_id = p.id
- AND s.segment_key = 'default'
-JOIN generated_contents c
-  ON c.project_id = p.id
- AND c.segment_id = s.id
- AND c.variant_key = 'default'
- AND c.recommendation_action_id IS NULL
-JOIN decision_runs r
-  ON r.project_id = p.id
- AND r.idempotency_key = 'dummy-2021-01-04'
-WHERE p.project_key = 'demo-shop'
-ON CONFLICT (project_id, segment_id, placement_key)
-WHERE experiment_variant_id IS NULL
-DO UPDATE
-SET
-    generated_content_id = EXCLUDED.generated_content_id,
-    traffic_weight = 1.0,
-    is_active = true,
-    is_winner = true,
-    priority = 0,
-    updated_at = now();
-
--- =========================================================
--- 7. Sample AI-defined segments
--- One normal segment and one anomalous segment.
--- =========================================================
-
-INSERT INTO segments (
-    project_id,
-    segment_key,
-    name,
-    description,
-    rule_json,
-    status,
-    is_default,
-    created_run_id
-)
-SELECT
-    p.id,
-    'age_30s__gender_male__channel_kakao__category_fresh',
-    '카카오톡 유입 / 30대 / 남성 / 신선식품 관심 사용자',
-    '상품 조회 대비 장바구니 전환이 낮아 AI 개선 액션 대상이 된 세그먼트',
-    '{"age_group":"30s","gender":"male","acquisition_channel":"kakao","primary_category":"fresh"}'::jsonb,
-    'active',
-    false,
-    r.id
-FROM projects p
-JOIN decision_runs r
-  ON r.project_id = p.id
- AND r.idempotency_key = 'dummy-2021-01-04'
-WHERE p.project_key = 'demo-shop'
-ON CONFLICT (project_id, segment_key) DO UPDATE
-SET
-    name = EXCLUDED.name,
-    description = EXCLUDED.description,
-    rule_json = EXCLUDED.rule_json,
-    status = 'active',
-    is_default = false,
-    updated_at = now();
-
-INSERT INTO segments (
-    project_id,
-    segment_key,
-    name,
-    description,
-    rule_json,
-    status,
-    is_default,
-    created_run_id
-)
-SELECT
-    p.id,
-    'age_20s__gender_female__channel_instagram__category_beauty',
-    '인스타그램 유입 / 20대 / 여성 / 뷰티 관심 사용자',
-    '이상 징후 없이 지표만 저장되는 정상 세그먼트 예시',
-    '{"age_group":"20s","gender":"female","acquisition_channel":"instagram","primary_category":"beauty"}'::jsonb,
-    'active',
-    false,
-    r.id
-FROM projects p
-JOIN decision_runs r
-  ON r.project_id = p.id
- AND r.idempotency_key = 'dummy-2021-01-04'
-WHERE p.project_key = 'demo-shop'
-ON CONFLICT (project_id, segment_key) DO UPDATE
-SET
-    name = EXCLUDED.name,
-    description = EXCLUDED.description,
-    rule_json = EXCLUDED.rule_json,
-    status = 'active',
-    is_default = false,
-    updated_at = now();
-
--- =========================================================
--- 8. Sample users and memberships
--- =========================================================
-
-INSERT INTO user_profiles (
-    project_id,
-    external_user_id,
-    gender,
-    age_group,
-    device_type,
-    acquisition_channel,
-    last_seen_at,
-    properties
-)
-SELECT p.id, v.external_user_id, v.gender, v.age_group, v.device_type, v.acquisition_channel, v.last_seen_at, v.properties
-FROM projects p
-CROSS JOIN (
+    'analysis_family_breakfast_001',
+    64,
+    (
+        SELECT jsonb_agg(
+            CASE
+                WHEN v.segment_id = 'seg_family_trip' AND gs.i % 4 IN (0, 1) THEN 0.82
+                WHEN v.segment_id = 'seg_family_trip' THEN 0.18
+                WHEN v.segment_id = 'seg_near_checkin_mobile' AND gs.i % 4 IN (1, 2) THEN 0.74
+                WHEN v.segment_id = 'seg_near_checkin_mobile' THEN 0.22
+                ELSE 0.25
+            END
+            ORDER BY gs.i
+        )
+        FROM generate_series(0, 63) AS gs(i)
+    ),
+    'hotel_rec_promo.v1',
+    'fixture',
+    TIMESTAMPTZ '2026-07-02 10:08:00+09'
+FROM (
     VALUES
-    ('user_kakao_30_male_001', 'male', '30s', 'mobile', 'kakao', TIMESTAMPTZ '2021-01-04 11:20:00+09', '{"primary_category":"fresh"}'::jsonb),
-    ('user_kakao_30_male_002', 'male', '30s', 'mobile', 'kakao', TIMESTAMPTZ '2021-01-04 12:10:00+09', '{"primary_category":"fresh"}'::jsonb),
-    ('user_instagram_20_female_001', 'female', '20s', 'mobile', 'instagram', TIMESTAMPTZ '2021-01-04 19:30:00+09', '{"primary_category":"beauty"}'::jsonb)
-) AS v(external_user_id, gender, age_group, device_type, acquisition_channel, last_seen_at, properties)
-WHERE p.project_key = 'demo-shop'
-ON CONFLICT (project_id, external_user_id) DO UPDATE
-SET
-    gender = EXCLUDED.gender,
-    age_group = EXCLUDED.age_group,
-    device_type = EXCLUDED.device_type,
-    acquisition_channel = EXCLUDED.acquisition_channel,
-    last_seen_at = EXCLUDED.last_seen_at,
-    properties = EXCLUDED.properties,
-    updated_at = now();
+    ('vec_family_trip_001', 'seg_family_trip'),
+    ('vec_near_checkin_001', 'seg_near_checkin_mobile')
+) AS v(segment_vector_id, segment_id);
 
-INSERT INTO user_segment_memberships (
+INSERT INTO promotion_target_segments (
+    analysis_id,
     project_id,
-    external_user_id,
+    campaign_id,
+    promotion_id,
     segment_id,
-    analysis_date,
-    is_primary,
-    confidence,
-    reason_json,
-    created_run_id
-)
-SELECT
-    p.id,
-    u.external_user_id,
-    s.id,
-    DATE '2021-01-04',
-    true,
-    1.0,
-    jsonb_build_object('source', 'dummy.sql', 'matched_segment_key', s.segment_key),
-    r.id
-FROM projects p
-JOIN decision_runs r
-  ON r.project_id = p.id
- AND r.idempotency_key = 'dummy-2021-01-04'
-JOIN user_profiles u
-  ON u.project_id = p.id
-JOIN segments s
-  ON s.project_id = p.id
- AND s.segment_key = CASE
-    WHEN u.external_user_id LIKE 'user_kakao_30_male_%'
-      THEN 'age_30s__gender_male__channel_kakao__category_fresh'
-    ELSE 'age_20s__gender_female__channel_instagram__category_beauty'
- END
-WHERE p.project_key = 'demo-shop'
-ON CONFLICT (project_id, external_user_id, segment_id, analysis_date) DO UPDATE
-SET
-    is_primary = true,
-    confidence = EXCLUDED.confidence,
-    reason_json = EXCLUDED.reason_json;
-
--- =========================================================
--- 9. Segment daily metrics
--- Normal segment has no anomaly.
--- Anomalous segment has view_to_purchase_rate below target 5%.
--- =========================================================
-
-INSERT INTO segment_daily_metrics (
-    project_id,
-    segment_id,
-    analysis_date,
-    user_count,
-    session_count,
-    page_view_count,
-    product_view_count,
-    add_to_cart_count,
-    checkout_start_count,
-    purchase_count,
-    ad_impression_count,
-    ad_click_count,
-    revenue,
-    view_to_cart_rate,
-    cart_to_checkout_rate,
-    checkout_to_purchase_rate,
-    view_to_purchase_rate,
-    ctr,
-    cvr,
-    baseline_view_to_purchase_rate,
-    target_view_to_purchase_rate,
-    metric_json,
-    created_run_id
-)
-SELECT
-    p.id,
-    s.id,
-    DATE '2021-01-04',
-    430,
-    610,
-    1850,
-    1000,
-    90,
-    50,
-    25,
-    820,
-    66,
-    1250000.00,
-    0.090000,
-    0.555556,
-    0.500000,
-    0.025000,
-    0.080488,
-    0.030488,
-    0.060000,
-    0.050000,
-    '{"note":"anomalous sample: low view_to_cart and low final conversion"}'::jsonb,
-    r.id
-FROM projects p
-JOIN segments s
-  ON s.project_id = p.id
- AND s.segment_key = 'age_30s__gender_male__channel_kakao__category_fresh'
-JOIN decision_runs r
-  ON r.project_id = p.id
- AND r.idempotency_key = 'dummy-2021-01-04'
-WHERE p.project_key = 'demo-shop'
-ON CONFLICT (project_id, segment_id, analysis_date) DO UPDATE
-SET
-    user_count = EXCLUDED.user_count,
-    session_count = EXCLUDED.session_count,
-    page_view_count = EXCLUDED.page_view_count,
-    product_view_count = EXCLUDED.product_view_count,
-    add_to_cart_count = EXCLUDED.add_to_cart_count,
-    checkout_start_count = EXCLUDED.checkout_start_count,
-    purchase_count = EXCLUDED.purchase_count,
-    ad_impression_count = EXCLUDED.ad_impression_count,
-    ad_click_count = EXCLUDED.ad_click_count,
-    revenue = EXCLUDED.revenue,
-    view_to_cart_rate = EXCLUDED.view_to_cart_rate,
-    cart_to_checkout_rate = EXCLUDED.cart_to_checkout_rate,
-    checkout_to_purchase_rate = EXCLUDED.checkout_to_purchase_rate,
-    view_to_purchase_rate = EXCLUDED.view_to_purchase_rate,
-    ctr = EXCLUDED.ctr,
-    cvr = EXCLUDED.cvr,
-    baseline_view_to_purchase_rate = EXCLUDED.baseline_view_to_purchase_rate,
-    target_view_to_purchase_rate = EXCLUDED.target_view_to_purchase_rate,
-    metric_json = EXCLUDED.metric_json;
-
-INSERT INTO segment_daily_metrics (
-    project_id,
-    segment_id,
-    analysis_date,
-    user_count,
-    session_count,
-    page_view_count,
-    product_view_count,
-    add_to_cart_count,
-    checkout_start_count,
-    purchase_count,
-    ad_impression_count,
-    ad_click_count,
-    revenue,
-    view_to_cart_rate,
-    cart_to_checkout_rate,
-    checkout_to_purchase_rate,
-    view_to_purchase_rate,
-    ctr,
-    cvr,
-    baseline_view_to_purchase_rate,
-    target_view_to_purchase_rate,
-    metric_json,
-    created_run_id
-)
-SELECT
-    p.id,
-    s.id,
-    DATE '2021-01-04',
-    320,
-    460,
-    1320,
-    700,
-    165,
-    98,
-    48,
-    610,
-    71,
-    2110000.00,
-    0.235714,
-    0.593939,
-    0.489796,
-    0.068571,
-    0.116393,
-    0.078689,
-    0.061000,
-    0.050000,
-    '{"note":"normal sample: no anomaly should be generated"}'::jsonb,
-    r.id
-FROM projects p
-JOIN segments s
-  ON s.project_id = p.id
- AND s.segment_key = 'age_20s__gender_female__channel_instagram__category_beauty'
-JOIN decision_runs r
-  ON r.project_id = p.id
- AND r.idempotency_key = 'dummy-2021-01-04'
-WHERE p.project_key = 'demo-shop'
-ON CONFLICT (project_id, segment_id, analysis_date) DO UPDATE
-SET
-    user_count = EXCLUDED.user_count,
-    session_count = EXCLUDED.session_count,
-    page_view_count = EXCLUDED.page_view_count,
-    product_view_count = EXCLUDED.product_view_count,
-    add_to_cart_count = EXCLUDED.add_to_cart_count,
-    checkout_start_count = EXCLUDED.checkout_start_count,
-    purchase_count = EXCLUDED.purchase_count,
-    ad_impression_count = EXCLUDED.ad_impression_count,
-    ad_click_count = EXCLUDED.ad_click_count,
-    revenue = EXCLUDED.revenue,
-    view_to_cart_rate = EXCLUDED.view_to_cart_rate,
-    cart_to_checkout_rate = EXCLUDED.cart_to_checkout_rate,
-    checkout_to_purchase_rate = EXCLUDED.checkout_to_purchase_rate,
-    view_to_purchase_rate = EXCLUDED.view_to_purchase_rate,
-    ctr = EXCLUDED.ctr,
-    cvr = EXCLUDED.cvr,
-    baseline_view_to_purchase_rate = EXCLUDED.baseline_view_to_purchase_rate,
-    target_view_to_purchase_rate = EXCLUDED.target_view_to_purchase_rate,
-    metric_json = EXCLUDED.metric_json;
-
--- =========================================================
--- 10. Anomaly and root cause for anomalous segment only
--- =========================================================
-
-INSERT INTO segment_anomalies (
-    project_id,
-    segment_id,
-    analysis_date,
-    metric_name,
-    actual_value,
-    expected_value,
-    target_value,
-    difference_value,
-    difference_rate,
-    severity,
-    impact_score,
+    segment_name,
+    segment_vector_id,
+    rule_json,
+    profile_json,
+    content_brief_json,
+    data_evidence_json,
+    estimated_size,
+    priority,
     status,
-    evidence_json,
-    created_run_id
+    created_at
 )
-SELECT
-    p.id,
-    s.id,
-    DATE '2021-01-04',
-    'view_to_purchase_rate',
-    0.025000,
-    0.060000,
-    0.050000,
-    -0.025000,
-    -0.500000,
+VALUES
+(
+    'analysis_family_breakfast_001',
+    'demo-shop',
+    'cmp_summer_family_2026',
+    'promo_family_breakfast',
+    'seg_family_trip',
+    'Family Trip Planners',
+    'vec_family_trip_001',
+    '{"srch_children_cnt":{"gte":1},"days_until_checkin":{"between":[0,14]}}'::jsonb,
+    '{"trip_type":"family","top_hotel_cluster":41}'::jsonb,
+    '{"angle":"free breakfast for children","tone":"warm and practical"}'::jsonb,
+    '{"baseline_booking_conversion_rate":0.061,"detail_to_start_drop":0.42}'::jsonb,
+    1840,
     'high',
-    0.875000,
-    'detected',
-    '{"dominant_drop":"view_to_cart","product_view_count":1000,"add_to_cart_count":90,"hypothesis":"benefit visibility or stockout issue"}'::jsonb,
-    r.id
-FROM projects p
-JOIN segments s
-  ON s.project_id = p.id
- AND s.segment_key = 'age_30s__gender_male__channel_kakao__category_fresh'
-JOIN decision_runs r
-  ON r.project_id = p.id
- AND r.idempotency_key = 'dummy-2021-01-04'
-WHERE p.project_key = 'demo-shop'
-ON CONFLICT (project_id, segment_id, analysis_date, metric_name) DO UPDATE
-SET
-    actual_value = EXCLUDED.actual_value,
-    expected_value = EXCLUDED.expected_value,
-    target_value = EXCLUDED.target_value,
-    difference_value = EXCLUDED.difference_value,
-    difference_rate = EXCLUDED.difference_rate,
-    severity = EXCLUDED.severity,
-    impact_score = EXCLUDED.impact_score,
-    status = 'detected',
-    evidence_json = EXCLUDED.evidence_json;
-
-INSERT INTO root_cause_candidates (
-    anomaly_id,
-    cause_type,
-    cause_key,
-    title,
-    description,
-    confidence_score,
-    impact_score,
-    rank_no,
-    evidence_json
-)
-SELECT
-    a.id,
-    'funnel_step_drop',
-    'view_to_cart',
-    '상품 조회 후 장바구니 추가 전환율 저하',
-    '상품을 조회한 사용자 대비 장바구니에 추가한 사용자가 적어 최종 구매 전환율이 목표보다 낮습니다.',
-    0.8200,
-    0.875000,
-    1,
-    '{"view_to_cart_rate":0.09,"expected_view_to_cart_rate":0.18,"recommended_action_key":"highlight_benefit_banner"}'::jsonb
-FROM projects p
-JOIN segments s
-  ON s.project_id = p.id
- AND s.segment_key = 'age_30s__gender_male__channel_kakao__category_fresh'
-JOIN segment_anomalies a
-  ON a.project_id = p.id
- AND a.segment_id = s.id
- AND a.analysis_date = DATE '2021-01-04'
- AND a.metric_name = 'view_to_purchase_rate'
-WHERE p.project_key = 'demo-shop'
-ON CONFLICT (anomaly_id, cause_type, cause_key) DO UPDATE
-SET
-    title = EXCLUDED.title,
-    description = EXCLUDED.description,
-    confidence_score = EXCLUDED.confidence_score,
-    impact_score = EXCLUDED.impact_score,
-    rank_no = EXCLUDED.rank_no,
-    evidence_json = EXCLUDED.evidence_json;
-
--- =========================================================
--- 11. Recommendation result and action
--- =========================================================
-
-INSERT INTO recommendation_results (
-    project_id,
-    segment_id,
-    anomaly_id,
-    primary_root_cause_id,
-    analysis_date,
-    summary,
-    status,
-    recommendation_json,
-    created_run_id
-)
-SELECT
-    p.id,
-    s.id,
-    a.id,
-    rc.id,
-    DATE '2021-01-04',
-    '카카오톡 유입 30대 남성 신선식품 세그먼트에서 상품 조회 후 장바구니 추가 전환율이 낮습니다. 혜택 강조 배너 실험을 추천합니다.',
-    'experiment_running',
-    '{"selected_action_keys":["highlight_benefit_banner"],"reason":"low view_to_cart_rate"}'::jsonb,
-    r.id
-FROM projects p
-JOIN segments s
-  ON s.project_id = p.id
- AND s.segment_key = 'age_30s__gender_male__channel_kakao__category_fresh'
-JOIN segment_anomalies a
-  ON a.project_id = p.id
- AND a.segment_id = s.id
- AND a.analysis_date = DATE '2021-01-04'
- AND a.metric_name = 'view_to_purchase_rate'
-JOIN root_cause_candidates rc
-  ON rc.anomaly_id = a.id
- AND rc.cause_key = 'view_to_cart'
-JOIN decision_runs r
-  ON r.project_id = p.id
- AND r.idempotency_key = 'dummy-2021-01-04'
-WHERE p.project_key = 'demo-shop'
-ON CONFLICT (project_id, segment_id, analysis_date, anomaly_id)
-WHERE anomaly_id IS NOT NULL
-DO UPDATE
-SET
-    primary_root_cause_id = EXCLUDED.primary_root_cause_id,
-    summary = EXCLUDED.summary,
-    status = EXCLUDED.status,
-    recommendation_json = EXCLUDED.recommendation_json,
-    updated_at = now();
-
-INSERT INTO recommendation_actions (
-    recommendation_result_id,
-    project_id,
-    segment_id,
-    action_catalog_id,
-    action_key,
-    title,
-    description,
-    priority,
-    expected_effect_metric,
-    expected_effect_direction,
-    expected_effect_value,
-    status,
-    metadata
-)
-SELECT
-    rr.id,
-    p.id,
-    s.id,
-    ac.id,
-    'highlight_benefit_banner',
-    '신선식품 혜택 강조 배너 노출',
-    '상품 리스트와 메인 배너에서 무료배송/특가 혜택을 강조해 장바구니 추가를 유도합니다.',
-    1,
-    'view_to_purchase_rate',
-    'increase',
-    0.015000,
     'running',
-    '{"source":"dummy.sql","target_funnel_step":"view_to_cart"}'::jsonb
-FROM projects p
-JOIN segments s
-  ON s.project_id = p.id
- AND s.segment_key = 'age_30s__gender_male__channel_kakao__category_fresh'
-JOIN segment_anomalies a
-  ON a.project_id = p.id
- AND a.segment_id = s.id
- AND a.analysis_date = DATE '2021-01-04'
- AND a.metric_name = 'view_to_purchase_rate'
-JOIN recommendation_results rr
-  ON rr.project_id = p.id
- AND rr.segment_id = s.id
- AND rr.analysis_date = DATE '2021-01-04'
- AND rr.anomaly_id = a.id
-JOIN action_catalog ac
-  ON ac.action_key = 'highlight_benefit_banner'
-WHERE p.project_key = 'demo-shop'
-ON CONFLICT (recommendation_result_id, action_key) DO UPDATE
-SET
-    title = EXCLUDED.title,
-    description = EXCLUDED.description,
-    priority = EXCLUDED.priority,
-    expected_effect_metric = EXCLUDED.expected_effect_metric,
-    expected_effect_direction = EXCLUDED.expected_effect_direction,
-    expected_effect_value = EXCLUDED.expected_effect_value,
-    status = EXCLUDED.status,
-    metadata = EXCLUDED.metadata,
-    updated_at = now();
+    TIMESTAMPTZ '2026-07-02 10:09:00+09'
+),
+(
+    'analysis_family_breakfast_001',
+    'demo-shop',
+    'cmp_summer_family_2026',
+    'promo_family_breakfast',
+    'seg_near_checkin_mobile',
+    'Near Check-in Mobile Users',
+    'vec_near_checkin_001',
+    '{"is_mobile":1,"days_until_checkin":{"between":[0,7]}}'::jsonb,
+    '{"trip_type":"last_minute","price_sensitivity":"high"}'::jsonb,
+    '{"angle":"limited-time breakfast bundle","tone":"clear and urgent"}'::jsonb,
+    '{"baseline_booking_conversion_rate":0.057,"detail_to_start_drop":0.39}'::jsonb,
+    1265,
+    'medium',
+    'running',
+    TIMESTAMPTZ '2026-07-02 10:09:00+09'
+);
 
 -- =========================================================
--- 12. Generated contents for control and treatment
+-- 6. Generation / content candidates
 -- =========================================================
 
-INSERT INTO generated_contents (
+INSERT INTO generation_runs (
+    generation_id,
+    analysis_id,
     project_id,
+    campaign_id,
+    promotion_id,
+    content_option_count,
+    operator_instruction,
+    input_json,
+    output_json,
+    generation_report_json,
+    status,
+    created_at,
+    updated_at
+)
+VALUES (
+    'gen_family_breakfast_001',
+    'analysis_family_breakfast_001',
+    'demo-shop',
+    'cmp_summer_family_2026',
+    'promo_family_breakfast',
+    2,
+    'Generate concise onsite banner copy for selected hotel booking segments.',
+    '{"segments":["seg_family_trip","seg_near_checkin_mobile"],"channel":"onsite_banner"}'::jsonb,
+    '{"content_ids":["content_family_breakfast_a","content_near_checkin_a"]}'::jsonb,
+    '{"model":"seed","passed_brand_check":true,"passed_schema_check":true}'::jsonb,
+    'completed',
+    TIMESTAMPTZ '2026-07-02 10:12:00+09',
+    TIMESTAMPTZ '2026-07-02 10:16:00+09'
+);
+
+INSERT INTO content_candidates (
+    content_id,
+    content_option_id,
+    generation_id,
+    analysis_id,
+    project_id,
+    campaign_id,
+    promotion_id,
     segment_id,
-    recommendation_action_id,
-    content_type,
-    variant_key,
+    channel,
     title,
     body,
-    cta_label,
-    landing_url,
-    image_url,
+    cta,
     image_prompt,
-    generation_model,
-    generation_status,
-    metadata,
-    created_run_id
-)
-SELECT
-    p.id,
-    s.id,
-    ra.id,
-    'banner',
-    'control',
-    '신선식품 인기 상품 모음',
-    '오늘 많이 찾는 신선식품을 한눈에 확인해보세요.',
-    '상품 보기',
-    '/collections/fresh',
-    '/static/banners/fresh-control.png',
-    'simple fresh food ecommerce banner',
-    'dummy',
-    'approved',
-    '{"source":"dummy.sql","role":"control"}'::jsonb,
-    r.id
-FROM projects p
-JOIN segments s
-  ON s.project_id = p.id
- AND s.segment_key = 'age_30s__gender_male__channel_kakao__category_fresh'
-JOIN recommendation_actions ra
-  ON ra.project_id = p.id
- AND ra.segment_id = s.id
- AND ra.action_key = 'highlight_benefit_banner'
-JOIN decision_runs r
-  ON r.project_id = p.id
- AND r.idempotency_key = 'dummy-2021-01-04'
-WHERE p.project_key = 'demo-shop'
-ON CONFLICT (project_id, recommendation_action_id, variant_key)
-WHERE recommendation_action_id IS NOT NULL
-DO UPDATE
-SET
-    title = EXCLUDED.title,
-    body = EXCLUDED.body,
-    cta_label = EXCLUDED.cta_label,
-    landing_url = EXCLUDED.landing_url,
-    image_url = EXCLUDED.image_url,
-    image_prompt = EXCLUDED.image_prompt,
-    generation_model = EXCLUDED.generation_model,
-    generation_status = EXCLUDED.generation_status,
-    metadata = EXCLUDED.metadata,
-    updated_at = now();
-
-INSERT INTO generated_contents (
-    project_id,
-    segment_id,
-    recommendation_action_id,
-    content_type,
-    variant_key,
-    title,
-    body,
-    cta_label,
     landing_url,
-    image_url,
-    image_prompt,
-    generation_model,
-    generation_status,
-    metadata,
-    created_run_id
-)
-SELECT
-    p.id,
-    s.id,
-    ra.id,
-    'banner',
-    'treatment_a',
-    '오늘 신선식품 무료배송 혜택을 확인하세요',
-    '장바구니에 담기 전, 카카오톡 유입 고객 전용 신선식품 특가와 무료배송 혜택을 확인해보세요.',
-    '혜택 상품 보기',
-    '/collections/fresh?promo=free-shipping',
-    '/static/banners/fresh-benefit-treatment-a.png',
-    'fresh food promotional banner, free shipping badge, clean ecommerce style',
-    'dummy',
-    'approved',
-    '{"source":"dummy.sql","role":"treatment","action_key":"highlight_benefit_banner"}'::jsonb,
-    r.id
-FROM projects p
-JOIN segments s
-  ON s.project_id = p.id
- AND s.segment_key = 'age_30s__gender_male__channel_kakao__category_fresh'
-JOIN recommendation_actions ra
-  ON ra.project_id = p.id
- AND ra.segment_id = s.id
- AND ra.action_key = 'highlight_benefit_banner'
-JOIN decision_runs r
-  ON r.project_id = p.id
- AND r.idempotency_key = 'dummy-2021-01-04'
-WHERE p.project_key = 'demo-shop'
-ON CONFLICT (project_id, recommendation_action_id, variant_key)
-WHERE recommendation_action_id IS NOT NULL
-DO UPDATE
-SET
-    title = EXCLUDED.title,
-    body = EXCLUDED.body,
-    cta_label = EXCLUDED.cta_label,
-    landing_url = EXCLUDED.landing_url,
-    image_url = EXCLUDED.image_url,
-    image_prompt = EXCLUDED.image_prompt,
-    generation_model = EXCLUDED.generation_model,
-    generation_status = EXCLUDED.generation_status,
-    metadata = EXCLUDED.metadata,
-    updated_at = now();
-
--- =========================================================
--- 13. Experiment and variants
--- =========================================================
-
-INSERT INTO experiments (
-    project_id,
-    segment_id,
-    recommendation_action_id,
-    name,
-    objective_metric,
-    target_value,
-    allocation_policy,
+    generation_prompt,
+    reason_summary,
+    data_evidence_json,
+    message_strategy,
+    metadata_json,
     status,
-    start_date,
-    end_date,
-    decision_rule_json,
-    created_run_id
+    created_at,
+    updated_at
 )
-SELECT
-    p.id,
-    s.id,
-    ra.id,
-    '신선식품 혜택 강조 배너 실험',
-    'view_to_purchase_rate',
-    0.050000,
-    'fixed_split',
+VALUES
+(
+    'content_family_breakfast_a',
+    'variant_family_a',
+    'gen_family_breakfast_001',
+    'analysis_family_breakfast_001',
+    'demo-shop',
+    'cmp_summer_family_2026',
+    'promo_family_breakfast',
+    'seg_family_trip',
+    'onsite_banner',
+    'Breakfast included for the whole family',
+    'Book a family room today and start the trip with breakfast covered.',
+    'View family rooms',
+    'bright hotel breakfast buffet with family-friendly room detail page banner',
+    '/promotions/family-breakfast?segment=family',
+    'Create onsite banner copy for family hotel shoppers.',
+    'Families showed high detail views but lower booking starts; breakfast benefit reduces decision friction.',
+    '{"detail_views":8420,"booking_starts":488,"conversion_gap":0.024}'::jsonb,
+    'benefit_highlight',
+    '{"seed_source":"postgres/dummy.sql","approved_by":"operator-demo"}'::jsonb,
+    'active',
+    TIMESTAMPTZ '2026-07-02 10:17:00+09',
+    TIMESTAMPTZ '2026-07-02 10:20:00+09'
+),
+(
+    'content_near_checkin_a',
+    'variant_mobile_a',
+    'gen_family_breakfast_001',
+    'analysis_family_breakfast_001',
+    'demo-shop',
+    'cmp_summer_family_2026',
+    'promo_family_breakfast',
+    'seg_near_checkin_mobile',
+    'onsite_banner',
+    'Still need a room this week?',
+    'Reserve now and get a breakfast bundle on selected stays.',
+    'Book before check-in',
+    'mobile hotel booking banner with clear limited-time breakfast bundle offer',
+    '/promotions/family-breakfast?segment=near-checkin',
+    'Create onsite banner copy for near check-in mobile users.',
+    'Mobile users close to check-in respond better to immediate value and simple booking CTA.',
+    '{"detail_views":5110,"booking_starts":292,"conversion_gap":0.019}'::jsonb,
+    'urgency_plus_value',
+    '{"seed_source":"postgres/dummy.sql","approved_by":"operator-demo"}'::jsonb,
+    'active',
+    TIMESTAMPTZ '2026-07-02 10:17:00+09',
+    TIMESTAMPTZ '2026-07-02 10:20:00+09'
+);
+
+-- =========================================================
+-- 7. Promotion run / ad experiments
+-- =========================================================
+
+INSERT INTO promotion_runs (
+    promotion_run_id,
+    project_id,
+    campaign_id,
+    promotion_id,
+    analysis_id,
+    generation_id,
+    loop_count,
+    status,
+    goal_snapshot_json,
+    started_at,
+    ended_at,
+    created_at,
+    updated_at
+)
+VALUES (
+    'run_family_20260702',
+    'demo-shop',
+    'cmp_summer_family_2026',
+    'promo_family_breakfast',
+    'analysis_family_breakfast_001',
+    'gen_family_breakfast_001',
+    1,
     'running',
-    DATE '2021-01-04',
+    '{"goal_metric":"booking_conversion_rate","goal_target_value":0.085,"goal_basis":"promotion_average"}'::jsonb,
+    TIMESTAMPTZ '2026-07-02 11:00:00+09',
     NULL,
-    '{"winner_rule":"target_value_and_min_sample","min_impressions":100,"min_conversions":10}'::jsonb,
-    r.id
-FROM projects p
-JOIN segments s
-  ON s.project_id = p.id
- AND s.segment_key = 'age_30s__gender_male__channel_kakao__category_fresh'
-JOIN recommendation_actions ra
-  ON ra.project_id = p.id
- AND ra.segment_id = s.id
- AND ra.action_key = 'highlight_benefit_banner'
-JOIN decision_runs r
-  ON r.project_id = p.id
- AND r.idempotency_key = 'dummy-2021-01-04'
-WHERE p.project_key = 'demo-shop'
-ON CONFLICT (project_id, recommendation_action_id)
-WHERE recommendation_action_id IS NOT NULL
-  AND status IN ('draft', 'running', 'paused')
-DO UPDATE
-SET
-    name = EXCLUDED.name,
-    objective_metric = EXCLUDED.objective_metric,
-    target_value = EXCLUDED.target_value,
-    allocation_policy = EXCLUDED.allocation_policy,
-    status = 'running',
-    decision_rule_json = EXCLUDED.decision_rule_json,
-    updated_at = now();
+    TIMESTAMPTZ '2026-07-02 10:30:00+09',
+    TIMESTAMPTZ '2026-07-03 10:00:00+09'
+);
 
-INSERT INTO experiment_variants (
-    experiment_id,
+UPDATE segment_vectors
+SET promotion_run_id = 'run_family_20260702'
+WHERE project_id = 'demo-shop'
+  AND promotion_id = 'promo_family_breakfast';
+
+INSERT INTO ad_experiments (
+    ad_experiment_id,
     project_id,
-    variant_key,
-    name,
-    generated_content_id,
-    is_control,
-    traffic_weight,
-    impression_count,
-    click_count,
-    conversion_count,
-    ctr,
-    conversion_rate,
-    status
-)
-SELECT
-    e.id,
-    p.id,
-    'control',
-    '기존 신선식품 배너',
-    c.id,
-    true,
-    0.5000,
-    410,
-    28,
-    9,
-    0.068293,
-    0.021951,
-    'active'
-FROM projects p
-JOIN segments s
-  ON s.project_id = p.id
- AND s.segment_key = 'age_30s__gender_male__channel_kakao__category_fresh'
-JOIN recommendation_actions ra
-  ON ra.project_id = p.id
- AND ra.segment_id = s.id
- AND ra.action_key = 'highlight_benefit_banner'
-JOIN experiments e
-  ON e.project_id = p.id
- AND e.recommendation_action_id = ra.id
-JOIN generated_contents c
-  ON c.project_id = p.id
- AND c.recommendation_action_id = ra.id
- AND c.variant_key = 'control'
-WHERE p.project_key = 'demo-shop'
-ON CONFLICT (experiment_id, variant_key) DO UPDATE
-SET
-    name = EXCLUDED.name,
-    generated_content_id = EXCLUDED.generated_content_id,
-    is_control = EXCLUDED.is_control,
-    traffic_weight = EXCLUDED.traffic_weight,
-    impression_count = EXCLUDED.impression_count,
-    click_count = EXCLUDED.click_count,
-    conversion_count = EXCLUDED.conversion_count,
-    ctr = EXCLUDED.ctr,
-    conversion_rate = EXCLUDED.conversion_rate,
-    status = EXCLUDED.status,
-    updated_at = now();
-
-INSERT INTO experiment_variants (
-    experiment_id,
-    project_id,
-    variant_key,
-    name,
-    generated_content_id,
-    is_control,
-    traffic_weight,
-    impression_count,
-    click_count,
-    conversion_count,
-    ctr,
-    conversion_rate,
-    status
-)
-SELECT
-    e.id,
-    p.id,
-    'treatment_a',
-    '혜택 강조 배너',
-    c.id,
-    false,
-    0.5000,
-    410,
-    38,
-    16,
-    0.092683,
-    0.039024,
-    'active'
-FROM projects p
-JOIN segments s
-  ON s.project_id = p.id
- AND s.segment_key = 'age_30s__gender_male__channel_kakao__category_fresh'
-JOIN recommendation_actions ra
-  ON ra.project_id = p.id
- AND ra.segment_id = s.id
- AND ra.action_key = 'highlight_benefit_banner'
-JOIN experiments e
-  ON e.project_id = p.id
- AND e.recommendation_action_id = ra.id
-JOIN generated_contents c
-  ON c.project_id = p.id
- AND c.recommendation_action_id = ra.id
- AND c.variant_key = 'treatment_a'
-WHERE p.project_key = 'demo-shop'
-ON CONFLICT (experiment_id, variant_key) DO UPDATE
-SET
-    name = EXCLUDED.name,
-    generated_content_id = EXCLUDED.generated_content_id,
-    is_control = EXCLUDED.is_control,
-    traffic_weight = EXCLUDED.traffic_weight,
-    impression_count = EXCLUDED.impression_count,
-    click_count = EXCLUDED.click_count,
-    conversion_count = EXCLUDED.conversion_count,
-    ctr = EXCLUDED.ctr,
-    conversion_rate = EXCLUDED.conversion_rate,
-    status = EXCLUDED.status,
-    updated_at = now();
-
--- =========================================================
--- 14. Segment ad mappings for experiment variants
--- Advertisement server reads these rows and uses traffic_weight for split.
--- =========================================================
-
-INSERT INTO segment_ad_mappings (
-    project_id,
+    campaign_id,
+    promotion_id,
+    promotion_run_id,
+    analysis_id,
+    generation_id,
     segment_id,
-    placement_key,
-    experiment_id,
-    experiment_variant_id,
-    generated_content_id,
-    traffic_weight,
-    is_active,
-    is_winner,
-    priority,
-    created_run_id
+    segment_name,
+    content_id,
+    content_option_id,
+    channel,
+    loop_count,
+    status,
+    goal_metric,
+    goal_target_value,
+    goal_basis,
+    started_at,
+    ended_at,
+    created_at,
+    updated_at
 )
-SELECT
-    p.id,
-    s.id,
-    'main_banner',
-    e.id,
-    ev.id,
-    ev.generated_content_id,
-    ev.traffic_weight,
-    true,
+VALUES
+(
+    'exp_family_banner_a',
+    'demo-shop',
+    'cmp_summer_family_2026',
+    'promo_family_breakfast',
+    'run_family_20260702',
+    'analysis_family_breakfast_001',
+    'gen_family_breakfast_001',
+    'seg_family_trip',
+    'Family Trip Planners',
+    'content_family_breakfast_a',
+    'variant_family_a',
+    'onsite_banner',
+    1,
+    'running',
+    'booking_conversion_rate',
+    0.085000,
+    'promotion_average',
+    TIMESTAMPTZ '2026-07-02 11:00:00+09',
+    NULL,
+    TIMESTAMPTZ '2026-07-02 10:35:00+09',
+    TIMESTAMPTZ '2026-07-03 10:00:00+09'
+),
+(
+    'exp_near_checkin_banner_a',
+    'demo-shop',
+    'cmp_summer_family_2026',
+    'promo_family_breakfast',
+    'run_family_20260702',
+    'analysis_family_breakfast_001',
+    'gen_family_breakfast_001',
+    'seg_near_checkin_mobile',
+    'Near Check-in Mobile Users',
+    'content_near_checkin_a',
+    'variant_mobile_a',
+    'onsite_banner',
+    1,
+    'approved',
+    'booking_conversion_rate',
+    0.085000,
+    'promotion_average',
+    TIMESTAMPTZ '2026-07-02 11:00:00+09',
+    NULL,
+    TIMESTAMPTZ '2026-07-02 10:35:00+09',
+    TIMESTAMPTZ '2026-07-03 10:00:00+09'
+);
+
+-- =========================================================
+-- 8. Evaluations
+-- =========================================================
+
+INSERT INTO promotion_evaluations (
+    evaluation_id,
+    project_id,
+    campaign_id,
+    promotion_id,
+    promotion_run_id,
+    ad_experiment_id,
+    segment_id,
+    content_id,
+    content_option_id,
+    metric,
+    target_value,
+    actual_value,
+    numerator_count,
+    denominator_count,
+    sample_size,
+    basis,
+    status,
+    feedback,
+    next_loop_required,
+    result_json,
+    created_at
+)
+VALUES
+(
+    'eval_family_booking_conversion',
+    'demo-shop',
+    'cmp_summer_family_2026',
+    'promo_family_breakfast',
+    'run_family_20260702',
+    'exp_family_banner_a',
+    'seg_family_trip',
+    'content_family_breakfast_a',
+    'variant_family_a',
+    'booking_conversion_rate',
+    0.085000,
+    0.091300,
+    168,
+    1840,
+    1840,
+    'promotion_average',
+    'goal_met',
+    'Family breakfast banner exceeded the booking conversion target.',
     false,
-    100,
-    r.id
-FROM projects p
-JOIN segments s
-  ON s.project_id = p.id
- AND s.segment_key = 'age_30s__gender_male__channel_kakao__category_fresh'
-JOIN recommendation_actions ra
-  ON ra.project_id = p.id
- AND ra.segment_id = s.id
- AND ra.action_key = 'highlight_benefit_banner'
-JOIN experiments e
-  ON e.project_id = p.id
- AND e.recommendation_action_id = ra.id
-JOIN experiment_variants ev
-  ON ev.experiment_id = e.id
-JOIN decision_runs r
-  ON r.project_id = p.id
- AND r.idempotency_key = 'dummy-2021-01-04'
-WHERE p.project_key = 'demo-shop'
-ON CONFLICT (project_id, segment_id, placement_key, experiment_variant_id)
-DO UPDATE
-SET
-    experiment_id = EXCLUDED.experiment_id,
-    generated_content_id = EXCLUDED.generated_content_id,
-    traffic_weight = EXCLUDED.traffic_weight,
-    is_active = true,
-    is_winner = false,
-    priority = 100,
-    updated_at = now();
+    '{"baseline":0.061,"lift":0.0303}'::jsonb,
+    TIMESTAMPTZ '2026-07-03 09:00:00+09'
+),
+(
+    'eval_near_checkin_booking_conversion',
+    'demo-shop',
+    'cmp_summer_family_2026',
+    'promo_family_breakfast',
+    'run_family_20260702',
+    'exp_near_checkin_banner_a',
+    'seg_near_checkin_mobile',
+    'content_near_checkin_a',
+    'variant_mobile_a',
+    'booking_conversion_rate',
+    0.085000,
+    0.079800,
+    101,
+    1265,
+    1265,
+    'promotion_average',
+    'goal_near',
+    'Near check-in mobile segment is close to target but may need stronger urgency copy.',
+    true,
+    '{"baseline":0.057,"lift":0.0228}'::jsonb,
+    TIMESTAMPTZ '2026-07-03 09:00:00+09'
+),
+(
+    'eval_run_click_rate',
+    'demo-shop',
+    'cmp_summer_family_2026',
+    'promo_family_breakfast',
+    'run_family_20260702',
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    'promotion_click_rate',
+    0.045000,
+    0.052000,
+    161,
+    3105,
+    3105,
+    'all_segments',
+    'partial_goal_met',
+    'Aggregate click rate is healthy while one conversion segment still needs another loop.',
+    true,
+    '{"promotion_impressions":3105,"promotion_clicks":161}'::jsonb,
+    TIMESTAMPTZ '2026-07-03 09:05:00+09'
+);
+
+-- =========================================================
+-- 9. Ad serving assignments / dispatch jobs / redirects
+-- =========================================================
+
+INSERT INTO user_segment_assignments (
+    project_id,
+    promotion_run_id,
+    user_id,
+    segment_id,
+    ad_experiment_id,
+    content_id,
+    content_option_id,
+    similarity_score,
+    fallback,
+    assignment_source,
+    assigned_at,
+    expires_at
+)
+VALUES
+(
+    'demo-shop',
+    'run_family_20260702',
+    'user_family_001',
+    'seg_family_trip',
+    'exp_family_banner_a',
+    'content_family_breakfast_a',
+    'variant_family_a',
+    0.941200,
+    false,
+    'decision_batch',
+    TIMESTAMPTZ '2026-07-02 11:05:00+09',
+    TIMESTAMPTZ '2026-08-31 23:59:59+09'
+),
+(
+    'demo-shop',
+    'run_family_20260702',
+    'user_mobile_001',
+    'seg_near_checkin_mobile',
+    'exp_near_checkin_banner_a',
+    'content_near_checkin_a',
+    'variant_mobile_a',
+    0.887500,
+    false,
+    'decision_batch',
+    TIMESTAMPTZ '2026-07-02 11:05:00+09',
+    TIMESTAMPTZ '2026-08-31 23:59:59+09'
+),
+(
+    'demo-shop',
+    'run_family_20260702',
+    'user_unknown_001',
+    'seg_family_trip',
+    'exp_family_banner_a',
+    'content_family_breakfast_a',
+    'variant_family_a',
+    0.620000,
+    true,
+    'fallback',
+    TIMESTAMPTZ '2026-07-02 11:05:00+09',
+    TIMESTAMPTZ '2026-08-31 23:59:59+09'
+);
+
+INSERT INTO ad_dispatch_jobs (
+    ad_dispatch_job_id,
+    project_id,
+    campaign_id,
+    promotion_id,
+    promotion_run_id,
+    ad_experiment_id,
+    channel,
+    status,
+    provider,
+    target_count,
+    sent_count,
+    failed_count,
+    created_at,
+    started_at,
+    completed_at,
+    metadata_json
+)
+VALUES
+(
+    'dispatch_family_banner_20260702',
+    'demo-shop',
+    'cmp_summer_family_2026',
+    'promo_family_breakfast',
+    'run_family_20260702',
+    'exp_family_banner_a',
+    'onsite_banner',
+    'running',
+    'dashboard-onsite',
+    1840,
+    842,
+    0,
+    TIMESTAMPTZ '2026-07-02 11:00:00+09',
+    TIMESTAMPTZ '2026-07-02 11:02:00+09',
+    NULL,
+    '{"placement_key":"hotel_detail_top","seed_source":"postgres/dummy.sql"}'::jsonb
+),
+(
+    'dispatch_near_checkin_banner_20260702',
+    'demo-shop',
+    'cmp_summer_family_2026',
+    'promo_family_breakfast',
+    'run_family_20260702',
+    'exp_near_checkin_banner_a',
+    'onsite_banner',
+    'scheduled',
+    'dashboard-onsite',
+    1265,
+    0,
+    0,
+    TIMESTAMPTZ '2026-07-02 11:00:00+09',
+    NULL,
+    NULL,
+    '{"placement_key":"hotel_detail_top","seed_source":"postgres/dummy.sql"}'::jsonb
+);
+
+INSERT INTO redirect_links (
+    redirect_id,
+    project_id,
+    campaign_id,
+    promotion_id,
+    promotion_run_id,
+    ad_experiment_id,
+    user_id,
+    segment_id,
+    content_id,
+    content_option_id,
+    target_url,
+    created_at,
+    expires_at
+)
+VALUES
+(
+    'redir_family_001',
+    'demo-shop',
+    'cmp_summer_family_2026',
+    'promo_family_breakfast',
+    'run_family_20260702',
+    'exp_family_banner_a',
+    'user_family_001',
+    'seg_family_trip',
+    'content_family_breakfast_a',
+    'variant_family_a',
+    '/hotels/hotel_kr_1207?promo=family-breakfast',
+    TIMESTAMPTZ '2026-07-02 11:06:00+09',
+    TIMESTAMPTZ '2026-08-31 23:59:59+09'
+),
+(
+    'redir_mobile_001',
+    'demo-shop',
+    'cmp_summer_family_2026',
+    'promo_family_breakfast',
+    'run_family_20260702',
+    'exp_near_checkin_banner_a',
+    'user_mobile_001',
+    'seg_near_checkin_mobile',
+    'content_near_checkin_a',
+    'variant_mobile_a',
+    '/hotels/search?promo=family-breakfast&checkin=soon',
+    TIMESTAMPTZ '2026-07-02 11:06:00+09',
+    TIMESTAMPTZ '2026-08-31 23:59:59+09'
+);
+
+-- =========================================================
+-- 10. Event validation errors
+-- =========================================================
+
+INSERT INTO event_validation_errors (
+    project_id,
+    event_id,
+    event_name,
+    error_code,
+    error_message,
+    payload_json,
+    created_at
+)
+VALUES
+(
+    'demo-shop',
+    'evt_pg_bad_0001',
+    'booking_complete',
+    'missing_booking_id',
+    'booking_complete requires properties.booking_id',
+    '{"seed_source":"postgres/dummy.sql","event_name":"booking_complete","properties":{"hotel_id":"hotel_kr_1207","revenue":"567000","currency":"KRW"}}'::jsonb,
+    TIMESTAMPTZ '2026-07-02 12:00:00+09'
+),
+(
+    'demo-shop',
+    'evt_pg_bad_0002',
+    'promotion_click',
+    'missing_promotion_run_id',
+    'promotion_click requires properties.promotion_run_id',
+    '{"seed_source":"postgres/dummy.sql","event_name":"promotion_click","properties":{"campaign_id":"cmp_summer_family_2026","promotion_id":"promo_family_breakfast"}}'::jsonb,
+    TIMESTAMPTZ '2026-07-02 12:05:00+09'
+);
+
+COMMIT;

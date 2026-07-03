@@ -11,9 +11,11 @@ LoopAd의 로컬 데이터 소스 계약을 공유하는 최소 repo입니다.
 ├── clickhouse/
 │   ├── database.sql
 │   ├── drop.sql
+│   ├── dummy.sql
 │   ├── named-collection.example.sql
 │   └── schema.sql
 ├── postgres/
+│   ├── dummy.sql
 │   └── schema.sql
 ├── environments/
 │   └── local.env
@@ -61,22 +63,44 @@ docker compose --env-file environments/local.env up -d
 
 PostgreSQL은 `postgres/schema.sql`, ClickHouse는 `clickhouse/schema.sql`을 컨테이너 최초 초기화 시점에 실행합니다.
 
+## PostgreSQL SQL
+
+- [postgres/schema.sql](postgres/schema.sql): `Campaign -> Promotion -> Segment -> Ad Experiment` 운영 스키마를 생성합니다.
+- [postgres/dummy.sql](postgres/dummy.sql): 로컬 개발용 `demo-shop` 캠페인/프로모션/세그먼트/실험/서빙 더미 데이터를 적재합니다.
+
+PostgreSQL 더미 데이터는 스키마 생성 후 아래처럼 넣습니다.
+
+```bash
+docker compose --env-file environments/local.env exec -T postgres \
+  psql -U loopad -d loopad -v ON_ERROR_STOP=1 < postgres/dummy.sql
+```
+
 ## ClickHouse SQL
 
 - [clickhouse/drop.sql](clickhouse/drop.sql): dev ClickHouse를 깨끗하게 다시 만들 때 `loopad` database와 Kafka named collection을 제거합니다.
 - [clickhouse/database.sql](clickhouse/database.sql): ClickHouse `loopad` database를 생성합니다.
+- [clickhouse/dummy.sql](clickhouse/dummy.sql): 로컬 개발용 `demo-shop` 호텔 이벤트/검색/벡터/검증 오류 더미 데이터를 적재합니다.
 - [clickhouse/named-collection.example.sql](clickhouse/named-collection.example.sql): `loopad_events_kafka` named collection 생성 예시입니다.
 - [clickhouse/schema.sql](clickhouse/schema.sql): `hotel_rec_promo.v1` 원천 이벤트 테이블과 호텔 프로모션 분석 view/materialized view를 생성합니다.
 
 스키마 변경 후 깨끗한 로컬 DB가 필요하면 Docker volume을 지운 뒤 다시 올립니다.
+
+ClickHouse 더미 데이터는 스키마 생성 후 아래처럼 넣습니다.
+
+```bash
+docker compose --env-file environments/local.env exec -T clickhouse \
+  clickhouse-client --user loopad_app --password loopad_local_password \
+  --multiquery < clickhouse/dummy.sql
+```
 
 ```bash
 docker compose --env-file environments/local.env down -v
 docker compose --env-file environments/local.env up -d
 ```
 
+
 ## 원칙
 
 - 이 repo에는 schema contract와 로컬 실행 설정만 둡니다.
-- shell script, dummy data, 팀원별 자동화는 repo 공통 계약에 포함하지 않습니다.
+- shell script, 운영 seed, 팀원별 자동화는 repo 공통 계약에 포함하지 않습니다.
 - 추가 데이터 소스나 seed가 필요해지면 별도 합의 후 파일을 추가합니다.
