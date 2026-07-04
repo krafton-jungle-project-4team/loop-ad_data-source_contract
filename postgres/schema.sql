@@ -702,6 +702,8 @@ CREATE TABLE IF NOT EXISTS content_candidates (
 
     -- onsite_banner
     image_prompt TEXT,
+    image_url TEXT,
+    image_s3_key TEXT,
 
     landing_url TEXT,
     generation_prompt TEXT,
@@ -1266,6 +1268,8 @@ SELECT
     cc.cta,
     cc.message,
     cc.image_prompt,
+    cc.image_url,
+    cc.image_s3_key,
     cc.landing_url,
     cc.status AS content_status
 FROM user_segment_assignments usa
