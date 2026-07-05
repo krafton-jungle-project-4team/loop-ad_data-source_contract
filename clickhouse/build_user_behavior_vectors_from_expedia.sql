@@ -1,17 +1,26 @@
 -- =========================================================
--- Build user_behavior_vectors from Kaggle Expedia train.csv rows.
+-- Build Demo User Behavior Vectors From Expedia Train Data
 --
--- Source:
---   expedia_hotel_events
+-- Input:
+-- - expedia_hotel_events loaded from Kaggle train.csv
 --
--- Target:
---   user_behavior_vectors
+-- Output:
+-- - user_behavior_vectors rows for Decision analysis clustering
+--
+-- Vector contract:
+-- - project_id: demo_project
+-- - vector_dim: 64
+-- - vector_version: v1
+-- - source: batch_profile
 --
 -- Vector layout:
---   0..5   user behavior summary features
---   6..37  hotel_cluster preference distribution, 32 buckets
---   38..53 srch_destination_id preference distribution, 16 buckets
---   54..63 channel distribution, 10 buckets
+-- - 0..5: user behavior summary features
+-- - 6..37: hotel_cluster preference distribution, 32 buckets
+-- - 38..53: destination preference distribution, 16 buckets
+-- - 54..63: channel distribution, 10 buckets
+--
+-- This file intentionally does not use destinations.csv.
+-- destinations.csv can be added later for richer destination embeddings.
 -- =========================================================
 
 INSERT INTO user_behavior_vectors (
@@ -36,28 +45,14 @@ WITH grouped AS (
             if(
                 isNull(srch_ci) OR isNull(srch_co),
                 0.0,
-                least(
-                    greatest(
-                        toFloat64(dateDiff('day', assumeNotNull(srch_ci), assumeNotNull(srch_co))),
-                        0.0
-                    ),
-                    14.0
-                ) / 14.0
+                least(greatest(dateDiff('day', srch_ci, srch_co), 0), 14) / 14.0
             )
         ) AS stay_nights_score,
         avg(
             if(
                 isNull(srch_ci),
                 0.5,
-                1.0 - (
-                    least(
-                        greatest(
-                            toFloat64(dateDiff('day', toDate(date_time), assumeNotNull(srch_ci))),
-                            0.0
-                        ),
-                        60.0
-                    ) / 60.0
-                )
+                1.0 - (least(greatest(dateDiff('day', toDate(date_time), srch_ci), 0), 60) / 60.0)
             )
         ) AS near_checkin_score,
         groupArray(toUInt64(hotel_cluster) % 32) AS hotel_cluster_buckets,
