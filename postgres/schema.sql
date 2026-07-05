@@ -18,6 +18,8 @@
 
 BEGIN;
 
+CREATE EXTENSION IF NOT EXISTS vector;
+
 -- =========================================================
 -- 0. Projects
 -- =========================================================
@@ -808,6 +810,7 @@ CREATE TABLE IF NOT EXISTS segment_vectors (
 
     vector_dim INT NOT NULL DEFAULT 64,
     vector_values JSONB NOT NULL,
+    embedding vector(64) NOT NULL,
     vector_version VARCHAR(50) NOT NULL DEFAULT 'v1',
     source VARCHAR(50) NOT NULL DEFAULT 'decision_analysis',
 
@@ -846,6 +849,9 @@ ON segment_vectors (promotion_id);
 
 CREATE INDEX IF NOT EXISTS idx_segment_vectors_promotion_run_id
 ON segment_vectors (promotion_run_id);
+
+CREATE INDEX IF NOT EXISTS idx_segment_vectors_embedding_hnsw
+ON segment_vectors USING hnsw (embedding vector_cosine_ops);
 
 -- =========================================================
 -- 13. Promotion Target Segments
@@ -1130,6 +1136,7 @@ CREATE TABLE IF NOT EXISTS user_segment_assignments (
 
     similarity_score NUMERIC(10, 6),
     fallback BOOLEAN NOT NULL DEFAULT false,
+    fallback_reason VARCHAR(50),
     assignment_source VARCHAR(50) NOT NULL DEFAULT 'decision_batch',
     assigned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at TIMESTAMPTZ,
@@ -1154,6 +1161,21 @@ CREATE TABLE IF NOT EXISTS user_segment_assignments (
 
     CONSTRAINT chk_user_segment_assignments_source
         CHECK (assignment_source IN ('decision_batch', 'fallback', 'manual', 'fixture')),
+
+    CONSTRAINT chk_user_segment_assignments_fallback_reason
+        CHECK (
+            (fallback = false AND fallback_reason IS NULL)
+            OR
+            (
+                fallback = true
+                AND fallback_reason IS NOT NULL
+                AND fallback_reason IN (
+                    'below_threshold',
+                    'no_candidate',
+                    'invalid_user_vector'
+                )
+            )
+        ),
 
     CONSTRAINT uq_user_segment_assignments_run_user
         UNIQUE (promotion_run_id, user_id)
