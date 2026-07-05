@@ -590,134 +590,7 @@ CREATE INDEX IF NOT EXISTS idx_promotion_segment_suggestions_status
 ON promotion_segment_suggestions (status);
 
 -- =========================================================
--- 9. Segment Vectors
--- 64-dimensional segment representative vectors managed by Decision logic,
--- DDL managed by Data Source Contract.
--- =========================================================
-CREATE TABLE IF NOT EXISTS segment_vectors (
-    segment_vector_id VARCHAR(100) PRIMARY KEY,
-    project_id VARCHAR(100) NOT NULL,
-    segment_id VARCHAR(100) NOT NULL,
-    promotion_id VARCHAR(100),
-    promotion_run_id VARCHAR(100),
-    analysis_id VARCHAR(100),
-
-    vector_dim INT NOT NULL DEFAULT 64,
-    vector_values JSONB NOT NULL,
-    vector_version VARCHAR(50) NOT NULL DEFAULT 'v1',
-    source VARCHAR(50) NOT NULL DEFAULT 'decision_analysis',
-
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-    CONSTRAINT fk_segment_vectors_project
-        FOREIGN KEY (project_id) REFERENCES projects (project_id),
-
-    CONSTRAINT fk_segment_vectors_segment
-        FOREIGN KEY (segment_id) REFERENCES segment_definitions (segment_id),
-
-    CONSTRAINT fk_segment_vectors_promotion
-        FOREIGN KEY (promotion_id) REFERENCES promotions (promotion_id),
-
-
-    CONSTRAINT fk_segment_vectors_analysis
-        FOREIGN KEY (analysis_id) REFERENCES promotion_analyses (analysis_id),
-
-    CONSTRAINT chk_segment_vectors_dim
-        CHECK (vector_dim = 64),
-
-    CONSTRAINT chk_segment_vectors_source
-        CHECK (source IN ('decision_analysis', 'fixture', 'manual', 'batch_profile'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_segment_vectors_project_id
-ON segment_vectors (project_id);
-
-CREATE INDEX IF NOT EXISTS idx_segment_vectors_segment_id
-ON segment_vectors (segment_id);
-
-CREATE INDEX IF NOT EXISTS idx_segment_vectors_promotion_id
-ON segment_vectors (promotion_id);
-
-CREATE INDEX IF NOT EXISTS idx_segment_vectors_promotion_run_id
-ON segment_vectors (promotion_run_id);
-
--- =========================================================
--- 10. Promotion Target Segments
--- Final segments confirmed by the dashboard user for a promotion analysis.
--- =========================================================
-CREATE TABLE IF NOT EXISTS promotion_target_segments (
-    id BIGSERIAL PRIMARY KEY,
-    analysis_id VARCHAR(100) NOT NULL,
-    project_id VARCHAR(100) NOT NULL,
-    campaign_id VARCHAR(100) NOT NULL,
-    promotion_id VARCHAR(100) NOT NULL,
-
-    segment_id VARCHAR(100) NOT NULL,
-    segment_name VARCHAR(255) NOT NULL,
-    segment_vector_id VARCHAR(100),
-    suggestion_id VARCHAR(100),
-
-    rule_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-    profile_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-    content_brief_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-    data_evidence_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-
-    estimated_size INT NOT NULL DEFAULT 0,
-    priority VARCHAR(50),
-    status VARCHAR(50) NOT NULL DEFAULT 'planned',
-    confirmed_by VARCHAR(100),
-    confirmed_at TIMESTAMPTZ,
-
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-    CONSTRAINT fk_promotion_target_segments_analysis
-        FOREIGN KEY (analysis_id) REFERENCES promotion_analyses (analysis_id),
-
-    CONSTRAINT fk_promotion_target_segments_project
-        FOREIGN KEY (project_id) REFERENCES projects (project_id),
-
-    CONSTRAINT fk_promotion_target_segments_campaign
-        FOREIGN KEY (campaign_id) REFERENCES campaigns (campaign_id),
-
-    CONSTRAINT fk_promotion_target_segments_promotion
-        FOREIGN KEY (promotion_id) REFERENCES promotions (promotion_id),
-
-    CONSTRAINT fk_promotion_target_segments_segment
-        FOREIGN KEY (segment_id) REFERENCES segment_definitions (segment_id),
-
-    CONSTRAINT fk_promotion_target_segments_vector
-        FOREIGN KEY (segment_vector_id) REFERENCES segment_vectors (segment_vector_id),
-
-    CONSTRAINT fk_promotion_target_segments_suggestion
-        FOREIGN KEY (suggestion_id) REFERENCES promotion_segment_suggestions (suggestion_id),
-
-    CONSTRAINT chk_promotion_target_segments_priority
-        CHECK (priority IS NULL OR priority IN ('low', 'medium', 'high')),
-
-    CONSTRAINT chk_promotion_target_segments_status
-        CHECK (status IN ('planned', 'content_ready', 'approved', 'running', 'goal_met', 'goal_not_met', 'insufficient_data', 'stopped')),
-
-    CONSTRAINT chk_promotion_target_segments_estimated_size
-        CHECK (estimated_size >= 0),
-
-    CONSTRAINT uq_promotion_target_segments_analysis_segment
-        UNIQUE (analysis_id, segment_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_promotion_target_segments_promotion_id
-ON promotion_target_segments (promotion_id);
-
-CREATE INDEX IF NOT EXISTS idx_promotion_target_segments_segment_id
-ON promotion_target_segments (segment_id);
-
-CREATE INDEX IF NOT EXISTS idx_promotion_target_segments_analysis_id
-ON promotion_target_segments (analysis_id);
-
-CREATE INDEX IF NOT EXISTS idx_promotion_target_segments_suggestion_id
-ON promotion_target_segments (suggestion_id);
-
--- =========================================================
--- 11. Generation Runs
+-- 9. Generation Runs
 -- =========================================================
 CREATE TABLE IF NOT EXISTS generation_runs (
     generation_id VARCHAR(100) PRIMARY KEY,
@@ -765,7 +638,7 @@ CREATE INDEX IF NOT EXISTS idx_generation_runs_status
 ON generation_runs (status);
 
 -- =========================================================
--- 12. Content Candidates
+-- 10. Content Candidates
 -- Segment-specific generated ad content candidates.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS content_candidates (
@@ -853,7 +726,7 @@ ON content_candidates (generation_id, segment_id)
 WHERE status IN ('approved', 'active');
 
 -- =========================================================
--- 13. Promotion Runs
+-- 11. Promotion Runs
 -- Promotion loop grouping. Actual experiments are ad_experiments.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS promotion_runs (
@@ -920,20 +793,134 @@ ON promotion_runs (promotion_id);
 CREATE INDEX IF NOT EXISTS idx_promotion_runs_status
 ON promotion_runs (status);
 
--- Add optional FK from segment_vectors.promotion_run_id after promotion_runs exists.
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_constraint
-        WHERE conname = 'fk_segment_vectors_promotion_run'
-    ) THEN
-        ALTER TABLE segment_vectors
-        ADD CONSTRAINT fk_segment_vectors_promotion_run
-        FOREIGN KEY (promotion_run_id)
-        REFERENCES promotion_runs (promotion_run_id);
-    END IF;
-END $$;
+-- =========================================================
+-- 12. Segment Vectors
+-- 64-dimensional segment representative vectors managed by Decision logic,
+-- DDL managed by Data Source Contract.
+-- =========================================================
+CREATE TABLE IF NOT EXISTS segment_vectors (
+    segment_vector_id VARCHAR(100) PRIMARY KEY,
+    project_id VARCHAR(100) NOT NULL,
+    segment_id VARCHAR(100) NOT NULL,
+    promotion_id VARCHAR(100),
+    promotion_run_id VARCHAR(100),
+    analysis_id VARCHAR(100),
+
+    vector_dim INT NOT NULL DEFAULT 64,
+    vector_values JSONB NOT NULL,
+    vector_version VARCHAR(50) NOT NULL DEFAULT 'v1',
+    source VARCHAR(50) NOT NULL DEFAULT 'decision_analysis',
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT fk_segment_vectors_project
+        FOREIGN KEY (project_id) REFERENCES projects (project_id),
+
+    CONSTRAINT fk_segment_vectors_segment
+        FOREIGN KEY (segment_id) REFERENCES segment_definitions (segment_id),
+
+    CONSTRAINT fk_segment_vectors_promotion
+        FOREIGN KEY (promotion_id) REFERENCES promotions (promotion_id),
+
+    CONSTRAINT fk_segment_vectors_promotion_run
+        FOREIGN KEY (promotion_run_id) REFERENCES promotion_runs (promotion_run_id),
+
+    CONSTRAINT fk_segment_vectors_analysis
+        FOREIGN KEY (analysis_id) REFERENCES promotion_analyses (analysis_id),
+
+    CONSTRAINT chk_segment_vectors_dim
+        CHECK (vector_dim = 64),
+
+    CONSTRAINT chk_segment_vectors_source
+        CHECK (source IN ('decision_analysis', 'fixture', 'manual', 'batch_profile'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_segment_vectors_project_id
+ON segment_vectors (project_id);
+
+CREATE INDEX IF NOT EXISTS idx_segment_vectors_segment_id
+ON segment_vectors (segment_id);
+
+CREATE INDEX IF NOT EXISTS idx_segment_vectors_promotion_id
+ON segment_vectors (promotion_id);
+
+CREATE INDEX IF NOT EXISTS idx_segment_vectors_promotion_run_id
+ON segment_vectors (promotion_run_id);
+
+-- =========================================================
+-- 13. Promotion Target Segments
+-- Final segments confirmed by the dashboard user for a promotion analysis.
+-- =========================================================
+CREATE TABLE IF NOT EXISTS promotion_target_segments (
+    id BIGSERIAL PRIMARY KEY,
+    analysis_id VARCHAR(100) NOT NULL,
+    project_id VARCHAR(100) NOT NULL,
+    campaign_id VARCHAR(100) NOT NULL,
+    promotion_id VARCHAR(100) NOT NULL,
+
+    segment_id VARCHAR(100) NOT NULL,
+    segment_name VARCHAR(255) NOT NULL,
+    segment_vector_id VARCHAR(100),
+    suggestion_id VARCHAR(100),
+
+    rule_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    profile_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    content_brief_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    data_evidence_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+    estimated_size INT NOT NULL DEFAULT 0,
+    priority VARCHAR(50),
+    status VARCHAR(50) NOT NULL DEFAULT 'planned',
+    confirmed_by VARCHAR(100),
+    confirmed_at TIMESTAMPTZ,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT fk_promotion_target_segments_analysis
+        FOREIGN KEY (analysis_id) REFERENCES promotion_analyses (analysis_id),
+
+    CONSTRAINT fk_promotion_target_segments_project
+        FOREIGN KEY (project_id) REFERENCES projects (project_id),
+
+    CONSTRAINT fk_promotion_target_segments_campaign
+        FOREIGN KEY (campaign_id) REFERENCES campaigns (campaign_id),
+
+    CONSTRAINT fk_promotion_target_segments_promotion
+        FOREIGN KEY (promotion_id) REFERENCES promotions (promotion_id),
+
+    CONSTRAINT fk_promotion_target_segments_segment
+        FOREIGN KEY (segment_id) REFERENCES segment_definitions (segment_id),
+
+    CONSTRAINT fk_promotion_target_segments_vector
+        FOREIGN KEY (segment_vector_id) REFERENCES segment_vectors (segment_vector_id),
+
+    CONSTRAINT fk_promotion_target_segments_suggestion
+        FOREIGN KEY (suggestion_id) REFERENCES promotion_segment_suggestions (suggestion_id),
+
+    CONSTRAINT chk_promotion_target_segments_priority
+        CHECK (priority IS NULL OR priority IN ('low', 'medium', 'high')),
+
+    CONSTRAINT chk_promotion_target_segments_status
+        CHECK (status IN ('planned', 'content_ready', 'approved', 'running', 'goal_met', 'goal_not_met', 'insufficient_data', 'stopped')),
+
+    CONSTRAINT chk_promotion_target_segments_estimated_size
+        CHECK (estimated_size >= 0),
+
+    CONSTRAINT uq_promotion_target_segments_analysis_segment
+        UNIQUE (analysis_id, segment_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_promotion_target_segments_promotion_id
+ON promotion_target_segments (promotion_id);
+
+CREATE INDEX IF NOT EXISTS idx_promotion_target_segments_segment_id
+ON promotion_target_segments (segment_id);
+
+CREATE INDEX IF NOT EXISTS idx_promotion_target_segments_analysis_id
+ON promotion_target_segments (analysis_id);
+
+CREATE INDEX IF NOT EXISTS idx_promotion_target_segments_suggestion_id
+ON promotion_target_segments (suggestion_id);
 
 -- =========================================================
 -- 14. Ad Experiments
