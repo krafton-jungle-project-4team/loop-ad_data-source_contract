@@ -43,6 +43,49 @@ PARTITION BY toYYYYMM(event_date)
 ORDER BY (project_id, event_name, event_time, user_id, event_id);
 
 -- =========================================================
+-- 0.1 Raw Events Kafka Source
+-- Requires the secret-bearing loopad_events_kafka named collection.
+-- This Kafka table is a non-persistent source; the materialized view below
+-- stores consumed messages in raw_events.
+-- =========================================================
+CREATE TABLE IF NOT EXISTS raw_events_kafka
+(
+    project_id String,
+    write_key String,
+    schema_version String,
+
+    event_id String,
+    event_name String,
+    event_time String,
+    received_at String,
+
+    source String,
+    user_id String,
+    session_id Nullable(String),
+
+    properties_json String,
+    validation_status String
+)
+ENGINE = Kafka(loopad_events_kafka);
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS raw_events_kafka_to_raw_events
+TO raw_events AS
+SELECT
+    project_id,
+    write_key,
+    if(empty(schema_version), 'hotel_rec_promo.v1', schema_version) AS schema_version,
+    event_id,
+    event_name,
+    parseDateTime64BestEffort(event_time, 3, 'UTC') AS event_time,
+    coalesce(parseDateTime64BestEffortOrNull(nullIf(received_at, ''), 3, 'UTC'), now64(3, 'UTC')) AS received_at,
+    if(empty(source), 'browser_sdk', source) AS source,
+    user_id,
+    session_id,
+    properties_json,
+    if(empty(validation_status), 'valid', validation_status) AS validation_status
+FROM raw_events_kafka;
+
+-- =========================================================
 -- 1. Expedia Hotel Events
 -- Kaggle Expedia Hotel Recommendations train.csv compatible table.
 -- =========================================================
