@@ -9,7 +9,7 @@
 --   1. demo-shop project / campaign / promotion
 --   2. segment preview, saved segment definitions, funnel setup
 --   3. ChatKit session/action examples
---   4. Decision analysis, vectors, target segments, generation output
+--   4. Decision analysis, suggestions, vectors, target segments, generation output
 --   5. promotion run, ad experiments, evaluations
 --   6. active ad serving assignments, dispatch jobs, redirects
 --   7. sample event validation errors
@@ -44,6 +44,9 @@ DELETE FROM ad_experiments
 WHERE project_id = 'demo-shop';
 
 DELETE FROM promotion_target_segments
+WHERE project_id = 'demo-shop';
+
+DELETE FROM promotion_segment_suggestions
 WHERE project_id = 'demo-shop';
 
 DELETE FROM segment_vectors
@@ -259,6 +262,8 @@ VALUES
 INSERT INTO segment_definitions (
     segment_id,
     project_id,
+    campaign_id,
+    promotion_id,
     segment_name,
     source,
     query_preview_id,
@@ -277,6 +282,8 @@ VALUES
 (
     'seg_existing_all',
     'demo-shop',
+    NULL,
+    NULL,
     'All Existing Users',
     'system_default',
     NULL,
@@ -294,6 +301,8 @@ VALUES
 (
     'seg_family_trip',
     'demo-shop',
+    'cmp_summer_family_2026',
+    'promo_family_breakfast',
     'Family Trip Planners',
     'custom_chatkit',
     'preview_family_trip',
@@ -311,6 +320,8 @@ VALUES
 (
     'seg_near_checkin_mobile',
     'demo-shop',
+    'cmp_summer_family_2026',
+    'promo_family_breakfast',
     'Near Check-in Mobile Users',
     'custom_chatkit',
     'preview_near_checkin',
@@ -448,7 +459,7 @@ VALUES (
 );
 
 -- =========================================================
--- 5. Decision analysis / vectors / selected target segments
+-- 5. Decision analysis / suggestions / vectors / confirmed target segments
 -- =========================================================
 
 INSERT INTO promotion_analyses (
@@ -523,6 +534,59 @@ FROM (
     ('vec_near_checkin_001', 'seg_near_checkin_mobile')
 ) AS v(segment_vector_id, segment_id);
 
+INSERT INTO promotion_segment_suggestions (
+    suggestion_id,
+    analysis_id,
+    project_id,
+    campaign_id,
+    promotion_id,
+    segment_id,
+    suggested_rank,
+    suggestion_source,
+    status,
+    score_json,
+    reason_json,
+    metadata_json,
+    created_at,
+    updated_at,
+    decided_at
+)
+VALUES
+(
+    'sugg_family_breakfast_family_trip',
+    'analysis_family_breakfast_001',
+    'demo-shop',
+    'cmp_summer_family_2026',
+    'promo_family_breakfast',
+    'seg_family_trip',
+    1,
+    'ai_ranked_existing',
+    'confirmed',
+    '{"fit_score":0.91,"sample_size":1840}'::jsonb,
+    '{"summary":"Family planners match the breakfast-inclusive promotion and have enough sample size."}'::jsonb,
+    '{"seed_source":"postgres/dummy.sql"}'::jsonb,
+    TIMESTAMPTZ '2026-07-02 10:07:00+09',
+    TIMESTAMPTZ '2026-07-02 10:09:00+09',
+    TIMESTAMPTZ '2026-07-02 10:09:00+09'
+),
+(
+    'sugg_family_breakfast_near_checkin',
+    'analysis_family_breakfast_001',
+    'demo-shop',
+    'cmp_summer_family_2026',
+    'promo_family_breakfast',
+    'seg_near_checkin_mobile',
+    2,
+    'ai_ranked_existing',
+    'confirmed',
+    '{"fit_score":0.83,"sample_size":1265}'::jsonb,
+    '{"summary":"Near check-in mobile users show urgency and high hotel-detail engagement."}'::jsonb,
+    '{"seed_source":"postgres/dummy.sql"}'::jsonb,
+    TIMESTAMPTZ '2026-07-02 10:07:00+09',
+    TIMESTAMPTZ '2026-07-02 10:09:00+09',
+    TIMESTAMPTZ '2026-07-02 10:09:00+09'
+);
+
 INSERT INTO promotion_target_segments (
     analysis_id,
     project_id,
@@ -538,6 +602,9 @@ INSERT INTO promotion_target_segments (
     estimated_size,
     priority,
     status,
+    suggestion_id,
+    confirmed_by,
+    confirmed_at,
     created_at
 )
 VALUES
@@ -556,6 +623,9 @@ VALUES
     1840,
     'high',
     'running',
+    'sugg_family_breakfast_family_trip',
+    'operator-demo',
+    TIMESTAMPTZ '2026-07-02 10:09:00+09',
     TIMESTAMPTZ '2026-07-02 10:09:00+09'
 ),
 (
@@ -573,6 +643,9 @@ VALUES
     1265,
     'medium',
     'running',
+    'sugg_family_breakfast_near_checkin',
+    'operator-demo',
+    TIMESTAMPTZ '2026-07-02 10:09:00+09',
     TIMESTAMPTZ '2026-07-02 10:09:00+09'
 );
 
