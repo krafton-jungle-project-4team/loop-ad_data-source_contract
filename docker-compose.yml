@@ -2,7 +2,10 @@ name: loop-ad_data-source_contract
 
 services:
   postgres:
-    image: pgvector/pgvector:0.8.0-pg16
+    build:
+      context: .
+      dockerfile: postgres/Dockerfile
+    image: loop-ad-postgres:16.13-pgvector0.8.0
     ports:
       - "${POSTGRES_PORT:?POSTGRES_PORT is required}:5432"
     environment:
