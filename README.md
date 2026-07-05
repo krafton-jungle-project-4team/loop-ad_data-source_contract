@@ -9,11 +9,14 @@ LoopAd의 로컬 데이터 소스 계약을 공유하는 최소 repo입니다.
 ```text
 .
 ├── clickhouse/
+│   ├── build_user_behavior_vectors_from_expedia.sql
 │   ├── database.sql
 │   ├── drop.sql
+│   ├── load_train_csv.sh
 │   ├── named-collection.example.sql
 │   └── schema.sql
 ├── postgres/
+│   ├── dummy.sql
 │   └── schema.sql
 ├── environments/
 │   └── local.env
@@ -61,12 +64,37 @@ docker compose --env-file environments/local.env up -d
 
 PostgreSQL은 `postgres/schema.sql`, ClickHouse는 `clickhouse/schema.sql`을 컨테이너 최초 초기화 시점에 실행합니다.
 
+## Expedia train.csv 적재
+
+Kaggle Expedia `train.csv`는 repo에 커밋하지 않고 로컬 파일로만 둡니다. 기본 위치는 `clickhouse/train.csv`입니다.
+
+로컬 DB를 띄운 뒤 아래 스크립트를 실행하면 `train.csv`를 `expedia_hotel_events`에 적재하고, 기본값으로 `user_behavior_vectors`까지 생성합니다.
+
+```bash
+docker compose --env-file environments/local.env up -d
+bash clickhouse/load_train_csv.sh
+```
+
+다른 위치의 CSV를 쓰려면 `TRAIN_CSV`를 넘깁니다.
+
+```bash
+TRAIN_CSV=/path/to/train.csv bash clickhouse/load_train_csv.sh
+```
+
+벡터 생성을 건너뛰고 CSV 적재만 하려면 다음처럼 실행합니다.
+
+```bash
+BUILD_USER_BEHAVIOR_VECTORS=0 bash clickhouse/load_train_csv.sh
+```
+
 ## ClickHouse SQL
 
 - [clickhouse/drop.sql](clickhouse/drop.sql): dev ClickHouse를 깨끗하게 다시 만들 때 `loopad` database와 Kafka named collection을 제거합니다.
 - [clickhouse/database.sql](clickhouse/database.sql): ClickHouse `loopad` database를 생성합니다.
 - [clickhouse/named-collection.example.sql](clickhouse/named-collection.example.sql): `loopad_events_kafka` named collection 생성 예시입니다.
 - [clickhouse/schema.sql](clickhouse/schema.sql): `hotel_rec_promo.v1` 원천 이벤트 테이블과 호텔 프로모션 분석 view/materialized view를 생성합니다.
+- [clickhouse/build_user_behavior_vectors_from_expedia.sql](clickhouse/build_user_behavior_vectors_from_expedia.sql): `expedia_hotel_events`에서 64차원 `user_behavior_vectors`를 생성합니다.
+- [clickhouse/load_train_csv.sh](clickhouse/load_train_csv.sh): 로컬 `train.csv`를 ClickHouse에 적재하고 벡터 생성 SQL을 실행합니다.
 
 스키마 변경 후 깨끗한 로컬 DB가 필요하면 Docker volume을 지운 뒤 다시 올립니다.
 
