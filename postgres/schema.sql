@@ -1,5 +1,6 @@
 -- =========================================================
 -- Loop-Ad PostgreSQL Schema Contract v1.6
+-- Draft: promotion segment suggestion / confirmation flow
 -- Owner: loop-ad_data-source_contract
 -- Domain: hotel / accommodation booking
 --
@@ -227,6 +228,8 @@ ON segment_query_previews (sample_size_status);
 CREATE TABLE IF NOT EXISTS segment_definitions (
     segment_id VARCHAR(100) PRIMARY KEY,
     project_id VARCHAR(100) NOT NULL,
+    campaign_id VARCHAR(100),
+    promotion_id VARCHAR(100),
 
     segment_name VARCHAR(255) NOT NULL,
     source VARCHAR(50) NOT NULL,
@@ -248,6 +251,12 @@ CREATE TABLE IF NOT EXISTS segment_definitions (
     CONSTRAINT fk_segment_definitions_project
         FOREIGN KEY (project_id) REFERENCES projects (project_id),
 
+    CONSTRAINT fk_segment_definitions_campaign
+        FOREIGN KEY (campaign_id) REFERENCES campaigns (campaign_id),
+
+    CONSTRAINT fk_segment_definitions_promotion
+        FOREIGN KEY (promotion_id) REFERENCES promotions (promotion_id),
+
     CONSTRAINT fk_segment_definitions_query_preview
         FOREIGN KEY (query_preview_id) REFERENCES segment_query_previews (query_preview_id),
 
@@ -264,11 +273,23 @@ CREATE TABLE IF NOT EXISTS segment_definitions (
         CHECK (total_eligible_user_count >= 0),
 
     CONSTRAINT chk_segment_definitions_ratio
-        CHECK (sample_ratio >= 0)
+        CHECK (sample_ratio >= 0),
+
+    CONSTRAINT chk_segment_definitions_scope
+        CHECK (
+            promotion_id IS NULL
+            OR campaign_id IS NOT NULL
+        )
 );
 
 CREATE INDEX IF NOT EXISTS idx_segment_definitions_project_id
 ON segment_definitions (project_id);
+
+CREATE INDEX IF NOT EXISTS idx_segment_definitions_campaign_id
+ON segment_definitions (campaign_id);
+
+CREATE INDEX IF NOT EXISTS idx_segment_definitions_promotion_id
+ON segment_definitions (promotion_id);
 
 CREATE INDEX IF NOT EXISTS idx_segment_definitions_source
 ON segment_definitions (source);
@@ -506,7 +527,70 @@ CREATE INDEX IF NOT EXISTS idx_promotion_analyses_status
 ON promotion_analyses (status);
 
 -- =========================================================
--- 8. Segment Vectors
+-- 8. Promotion Segment Suggestions
+-- AI-proposed segment candidates for a specific promotion analysis.
+-- These are proposals, not final confirmed target segments.
+-- =========================================================
+CREATE TABLE IF NOT EXISTS promotion_segment_suggestions (
+    suggestion_id VARCHAR(100) PRIMARY KEY,
+
+    analysis_id VARCHAR(100) NOT NULL,
+    project_id VARCHAR(100) NOT NULL,
+    campaign_id VARCHAR(100) NOT NULL,
+    promotion_id VARCHAR(100) NOT NULL,
+    segment_id VARCHAR(100) NOT NULL,
+
+    suggested_rank INT NOT NULL,
+    suggestion_source VARCHAR(50) NOT NULL DEFAULT 'ai_generated',
+    status VARCHAR(50) NOT NULL DEFAULT 'suggested',
+
+    score_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    reason_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    decided_at TIMESTAMPTZ,
+
+    CONSTRAINT fk_promotion_segment_suggestions_analysis
+        FOREIGN KEY (analysis_id) REFERENCES promotion_analyses (analysis_id),
+
+    CONSTRAINT fk_promotion_segment_suggestions_project
+        FOREIGN KEY (project_id) REFERENCES projects (project_id),
+
+    CONSTRAINT fk_promotion_segment_suggestions_campaign
+        FOREIGN KEY (campaign_id) REFERENCES campaigns (campaign_id),
+
+    CONSTRAINT fk_promotion_segment_suggestions_promotion
+        FOREIGN KEY (promotion_id) REFERENCES promotions (promotion_id),
+
+    CONSTRAINT fk_promotion_segment_suggestions_segment
+        FOREIGN KEY (segment_id) REFERENCES segment_definitions (segment_id),
+
+    CONSTRAINT chk_promotion_segment_suggestions_source
+        CHECK (suggestion_source IN ('ai_generated', 'ai_ranked_existing')),
+
+    CONSTRAINT chk_promotion_segment_suggestions_status
+        CHECK (status IN ('suggested', 'accepted', 'dismissed', 'confirmed')),
+
+    CONSTRAINT chk_promotion_segment_suggestions_rank
+        CHECK (suggested_rank >= 1),
+
+    CONSTRAINT uq_promotion_segment_suggestions_analysis_segment
+        UNIQUE (analysis_id, segment_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_promotion_segment_suggestions_analysis_id
+ON promotion_segment_suggestions (analysis_id);
+
+CREATE INDEX IF NOT EXISTS idx_promotion_segment_suggestions_promotion_id
+ON promotion_segment_suggestions (promotion_id);
+
+CREATE INDEX IF NOT EXISTS idx_promotion_segment_suggestions_status
+ON promotion_segment_suggestions (status);
+
+-- =========================================================
+-- 9. Segment Vectors
 -- 64-dimensional segment representative vectors managed by Decision logic,
 -- DDL managed by Data Source Contract.
 -- =========================================================
@@ -558,8 +642,8 @@ CREATE INDEX IF NOT EXISTS idx_segment_vectors_promotion_run_id
 ON segment_vectors (promotion_run_id);
 
 -- =========================================================
--- 9. Promotion Target Segments
--- Segments chosen by Decision for a promotion analysis.
+-- 10. Promotion Target Segments
+-- Final segments confirmed by the dashboard user for a promotion analysis.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS promotion_target_segments (
     id BIGSERIAL PRIMARY KEY,
@@ -571,6 +655,7 @@ CREATE TABLE IF NOT EXISTS promotion_target_segments (
     segment_id VARCHAR(100) NOT NULL,
     segment_name VARCHAR(255) NOT NULL,
     segment_vector_id VARCHAR(100),
+    suggestion_id VARCHAR(100),
 
     rule_json JSONB NOT NULL DEFAULT '{}'::jsonb,
     profile_json JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -580,6 +665,8 @@ CREATE TABLE IF NOT EXISTS promotion_target_segments (
     estimated_size INT NOT NULL DEFAULT 0,
     priority VARCHAR(50),
     status VARCHAR(50) NOT NULL DEFAULT 'planned',
+    confirmed_by VARCHAR(100),
+    confirmed_at TIMESTAMPTZ,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
@@ -600,6 +687,9 @@ CREATE TABLE IF NOT EXISTS promotion_target_segments (
 
     CONSTRAINT fk_promotion_target_segments_vector
         FOREIGN KEY (segment_vector_id) REFERENCES segment_vectors (segment_vector_id),
+
+    CONSTRAINT fk_promotion_target_segments_suggestion
+        FOREIGN KEY (suggestion_id) REFERENCES promotion_segment_suggestions (suggestion_id),
 
     CONSTRAINT chk_promotion_target_segments_priority
         CHECK (priority IS NULL OR priority IN ('low', 'medium', 'high')),
@@ -623,8 +713,11 @@ ON promotion_target_segments (segment_id);
 CREATE INDEX IF NOT EXISTS idx_promotion_target_segments_analysis_id
 ON promotion_target_segments (analysis_id);
 
+CREATE INDEX IF NOT EXISTS idx_promotion_target_segments_suggestion_id
+ON promotion_target_segments (suggestion_id);
+
 -- =========================================================
--- 10. Generation Runs
+-- 11. Generation Runs
 -- =========================================================
 CREATE TABLE IF NOT EXISTS generation_runs (
     generation_id VARCHAR(100) PRIMARY KEY,
@@ -672,7 +765,7 @@ CREATE INDEX IF NOT EXISTS idx_generation_runs_status
 ON generation_runs (status);
 
 -- =========================================================
--- 11. Content Candidates
+-- 12. Content Candidates
 -- Segment-specific generated ad content candidates.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS content_candidates (
@@ -760,7 +853,7 @@ ON content_candidates (generation_id, segment_id)
 WHERE status IN ('approved', 'active');
 
 -- =========================================================
--- 12. Promotion Runs
+-- 13. Promotion Runs
 -- Promotion loop grouping. Actual experiments are ad_experiments.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS promotion_runs (
@@ -827,7 +920,6 @@ ON promotion_runs (promotion_id);
 CREATE INDEX IF NOT EXISTS idx_promotion_runs_status
 ON promotion_runs (status);
 
-
 -- Add optional FK from segment_vectors.promotion_run_id after promotion_runs exists.
 DO $$
 BEGIN
@@ -844,7 +936,7 @@ BEGIN
 END $$;
 
 -- =========================================================
--- 13. Ad Experiments
+-- 14. Ad Experiments
 -- Segment-level ad experiment. One per segment in a promotion_run.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS ad_experiments (
@@ -952,7 +1044,7 @@ CREATE INDEX IF NOT EXISTS idx_ad_experiments_status
 ON ad_experiments (status);
 
 -- =========================================================
--- 14. Promotion Evaluations
+-- 15. Promotion Evaluations
 -- Stores ad_experiment-level and optional promotion_run aggregate evaluation.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS promotion_evaluations (
@@ -1035,7 +1127,7 @@ CREATE INDEX IF NOT EXISTS idx_promotion_evaluations_status
 ON promotion_evaluations (status);
 
 -- =========================================================
--- 15. User Segment Assignments
+-- 16. User Segment Assignments
 -- Decision builds these in batch. Dashboard ad serving reads these.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS user_segment_assignments (
@@ -1096,7 +1188,7 @@ CREATE INDEX IF NOT EXISTS idx_user_segment_assignments_ad_experiment_id
 ON user_segment_assignments (ad_experiment_id);
 
 -- =========================================================
--- 16. Ad Dispatch Jobs
+-- 17. Ad Dispatch Jobs
 -- Dashboard-owned email/sms dispatch state.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS ad_dispatch_jobs (
@@ -1155,7 +1247,7 @@ CREATE INDEX IF NOT EXISTS idx_ad_dispatch_jobs_status
 ON ad_dispatch_jobs (status);
 
 -- =========================================================
--- 17. Redirect Links
+-- 18. Redirect Links
 -- Dashboard-owned redirect tracking for email/sms.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS redirect_links (
@@ -1210,7 +1302,7 @@ CREATE INDEX IF NOT EXISTS idx_redirect_links_user_id
 ON redirect_links (user_id);
 
 -- =========================================================
--- 18. Event Validation Errors
+-- 19. Event Validation Errors
 -- Collector/Dashboard can show bad event payloads.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS event_validation_errors (
@@ -1237,7 +1329,7 @@ CREATE INDEX IF NOT EXISTS idx_event_validation_errors_created_at
 ON event_validation_errors (created_at);
 
 -- =========================================================
--- 19. Active Ad Serving Assignments View
+-- 20. Active Ad Serving Assignments View
 -- Dashboard ad hot path uses DB/view; it must not call Decision API per request.
 -- =========================================================
 CREATE OR REPLACE VIEW active_ad_serving_assignments AS
