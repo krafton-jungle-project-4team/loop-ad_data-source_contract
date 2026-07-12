@@ -1380,4 +1380,129 @@ WHERE ae.status IN ('approved', 'running')
   AND cc.status IN ('approved', 'active')
   AND (usa.expires_at IS NULL OR usa.expires_at > now());
 
+-- =========================================================
+-- 21. SDK Tracking Plans
+-- Dashboard-owned draft plans and immutable published revisions.
+-- =========================================================
+CREATE TABLE IF NOT EXISTS tracking_plans (
+    tracking_plan_id VARCHAR(100) PRIMARY KEY,
+    project_id VARCHAR(100) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    status VARCHAR(50) NOT NULL DEFAULT 'draft',
+    current_revision INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT fk_tracking_plans_project
+        FOREIGN KEY (project_id) REFERENCES projects (project_id),
+
+    CONSTRAINT chk_tracking_plans_name
+        CHECK (btrim(name) <> ''),
+
+    CONSTRAINT chk_tracking_plans_status
+        CHECK (status IN ('draft', 'published', 'archived')),
+
+    CONSTRAINT chk_tracking_plans_current_revision
+        CHECK (current_revision >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tracking_plans_project_status
+ON tracking_plans (project_id, status);
+
+CREATE TABLE IF NOT EXISTS tracking_plan_revisions (
+    tracking_plan_id VARCHAR(100) NOT NULL,
+    revision INT NOT NULL,
+    schema_json JSONB NOT NULL,
+    published_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by VARCHAR(100),
+
+    CONSTRAINT pk_tracking_plan_revisions
+        PRIMARY KEY (tracking_plan_id, revision),
+
+    CONSTRAINT fk_tracking_plan_revisions_plan
+        FOREIGN KEY (tracking_plan_id) REFERENCES tracking_plans (tracking_plan_id),
+
+    CONSTRAINT chk_tracking_plan_revisions_revision
+        CHECK (revision >= 1),
+
+    CONSTRAINT chk_tracking_plan_revisions_schema_object
+        CHECK (jsonb_typeof(schema_json) = 'object')
+);
+
+CREATE INDEX IF NOT EXISTS idx_tracking_plan_revisions_published_at
+ON tracking_plan_revisions (tracking_plan_id, published_at DESC);
+
+CREATE OR REPLACE FUNCTION prevent_tracking_plan_revision_mutation()
+RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'published tracking plan revisions are immutable';
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_tracking_plan_revisions_immutable ON tracking_plan_revisions;
+CREATE TRIGGER trg_tracking_plan_revisions_immutable
+BEFORE UPDATE OR DELETE ON tracking_plan_revisions
+FOR EACH ROW EXECUTE FUNCTION prevent_tracking_plan_revision_mutation();
+
+CREATE TABLE IF NOT EXISTS tracking_plan_events (
+    tracking_plan_id VARCHAR(100) NOT NULL,
+    event_name VARCHAR(100) NOT NULL,
+    description TEXT,
+    status VARCHAR(50) NOT NULL DEFAULT 'draft',
+    properties_schema_json JSONB NOT NULL DEFAULT '{"type":"object","properties":{},"required":[]}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT pk_tracking_plan_events
+        PRIMARY KEY (tracking_plan_id, event_name),
+
+    CONSTRAINT fk_tracking_plan_events_plan
+        FOREIGN KEY (tracking_plan_id) REFERENCES tracking_plans (tracking_plan_id),
+
+    CONSTRAINT chk_tracking_plan_events_name
+        CHECK (btrim(event_name) <> ''),
+
+    CONSTRAINT chk_tracking_plan_events_status
+        CHECK (status IN ('draft', 'system', 'archived')),
+
+    CONSTRAINT chk_tracking_plan_events_schema_object
+        CHECK (jsonb_typeof(properties_schema_json) = 'object')
+);
+
+CREATE INDEX IF NOT EXISTS idx_tracking_plan_events_plan_status
+ON tracking_plan_events (tracking_plan_id, status);
+
+CREATE TABLE IF NOT EXISTS project_sdk_settings (
+    project_id VARCHAR(100) PRIMARY KEY,
+    allowed_origins_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    published_tracking_plan_id VARCHAR(100),
+    published_revision INT,
+    status VARCHAR(50) NOT NULL DEFAULT 'active',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT fk_project_sdk_settings_project
+        FOREIGN KEY (project_id) REFERENCES projects (project_id),
+
+    CONSTRAINT fk_project_sdk_settings_published_revision
+        FOREIGN KEY (published_tracking_plan_id, published_revision)
+        REFERENCES tracking_plan_revisions (tracking_plan_id, revision),
+
+    CONSTRAINT chk_project_sdk_settings_origins_array
+        CHECK (jsonb_typeof(allowed_origins_json) = 'array'),
+
+    CONSTRAINT chk_project_sdk_settings_published_pair
+        CHECK (
+            (published_tracking_plan_id IS NULL AND published_revision IS NULL)
+            OR
+            (published_tracking_plan_id IS NOT NULL AND published_revision IS NOT NULL)
+        ),
+
+    CONSTRAINT chk_project_sdk_settings_status
+        CHECK (status IN ('active', 'disabled'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_sdk_settings_published_revision
+ON project_sdk_settings (published_tracking_plan_id, published_revision);
+
 COMMIT;
