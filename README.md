@@ -50,7 +50,13 @@ LOOPAD_CLICKHOUSE_PASSWORD=loopad_local_password
 
 ## 현재 계약 요약
 
-PostgreSQL은 `Campaign -> Promotion -> Segment -> Ad Experiment` 실행 상태를 저장하며, ANN segment matching을 위해 `pgvector` extension을 사용합니다. 핵심 테이블은 `campaigns`, `promotions`, `promotion_analyses`, `promotion_target_segments`, `generation_runs`, `content_candidates`, `promotion_runs`, `ad_experiments`, `promotion_evaluations`, `user_segment_assignments`, `segment_query_previews`, `segment_definitions`입니다.
+PostgreSQL은 `Campaign -> Promotion -> Segment -> Ad Experiment` 실행 상태를 저장하며, ANN segment matching을 위해 `pgvector` extension을 사용합니다. 핵심 테이블은 `campaigns`, `promotions`, `promotion_analyses`, `promotion_target_segments`, `generation_runs`, `content_candidates`, `promotion_runs`, `ad_experiments`, `promotion_evaluations`, `next_loop_preparations`, `user_segment_assignments`, `segment_query_previews`, `segment_definitions`입니다.
+
+Manual next-loop는 `next_loop_preparations`에 source run별 승인 attempt와 activation 결과를 저장합니다. Child `ad_experiments`는 nullable `parent_ad_experiment_id`, `source_evaluation_id`로 lineage를 남기며, 기존 A1과 legacy row는 두 값을 모두 `NULL`로 유지합니다. 두 lineage 값이 같은 segment와 promotion을 가리키는지, source evaluation이 parent의 올바른 평가인지 확인하는 책임은 Decision activation transaction에 있습니다.
+
+`active_ad_serving_assignments`는 실행 상태인 `approved`, `running`과 함께 legacy evaluation-result 상태인 `goal_met`, `goal_not_met`, `insufficient_data`를 호환합니다. Legacy row는 종료되지 않았고 현재 experiment status와 일치하는 historical individual `promotion_evaluations` row가 실제로 존재할 때만 serving 대상입니다. 최신 evaluation 결과는 Dashboard 표시와 next-loop 판단에 사용하며, 재평가 결과가 legacy experiment status와 달라져도 serving 여부를 바꾸지 않습니다. Provenance가 없는 assignment-origin `insufficient_data`는 serving 대상이 아닙니다.
+
+이 repo의 schema 변경 merge는 기존 dev 또는 운영 DB에 DDL을 적용하지 않습니다. Dashboard/Decision의 manual cutover, 기존 데이터 audit, 별도 DB 운영 검증이 완료된 뒤 DB/Infra owner가 실제 환경에 적용해야 하며, 이 repo에는 migration history를 추가하지 않습니다.
 
 Dashboard의 SDK Tracking Plan은 기존 `projects.write_key`를 공개 connection ID 겸 write key로 사용합니다. `tracking_plans`와 `tracking_plan_events`가 편집 가능한 draft를, `tracking_plan_revisions`가 게시 시점의 immutable JSON snapshot을, `project_sdk_settings`가 허용 Origin과 활성 게시 revision을 보관합니다. 게시 처리는 애플리케이션에서 revision insert와 활성 revision 변경을 같은 transaction으로 실행해야 합니다.
 
