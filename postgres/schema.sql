@@ -949,6 +949,9 @@ CREATE TABLE IF NOT EXISTS ad_experiments (
     content_id VARCHAR(100) NOT NULL,
     content_option_id VARCHAR(100) NOT NULL,
 
+    parent_ad_experiment_id VARCHAR(100),
+    source_evaluation_id VARCHAR(100),
+
     channel VARCHAR(50) NOT NULL,
     loop_count INT NOT NULL DEFAULT 1,
     status VARCHAR(50) NOT NULL DEFAULT 'planned',
@@ -985,6 +988,16 @@ CREATE TABLE IF NOT EXISTS ad_experiments (
 
     CONSTRAINT fk_ad_experiments_content
         FOREIGN KEY (content_id) REFERENCES content_candidates (content_id),
+
+    CONSTRAINT fk_ad_experiments_parent
+        FOREIGN KEY (parent_ad_experiment_id) REFERENCES ad_experiments (ad_experiment_id),
+
+    CONSTRAINT chk_ad_experiments_lineage_pair
+        CHECK (
+            (parent_ad_experiment_id IS NULL AND source_evaluation_id IS NULL)
+            OR
+            (parent_ad_experiment_id IS NOT NULL AND source_evaluation_id IS NOT NULL)
+        ),
 
     CONSTRAINT chk_ad_experiments_channel
         CHECK (channel IN ('email', 'sms', 'onsite_banner')),
@@ -1035,6 +1048,12 @@ ON ad_experiments (segment_id);
 
 CREATE INDEX IF NOT EXISTS idx_ad_experiments_status
 ON ad_experiments (status);
+
+CREATE INDEX IF NOT EXISTS idx_ad_experiments_parent_ad_experiment_id
+ON ad_experiments (parent_ad_experiment_id);
+
+CREATE INDEX IF NOT EXISTS idx_ad_experiments_source_evaluation_id
+ON ad_experiments (source_evaluation_id);
 
 -- =========================================================
 -- 15. Promotion Evaluations
@@ -1119,8 +1138,101 @@ ON promotion_evaluations (segment_id);
 CREATE INDEX IF NOT EXISTS idx_promotion_evaluations_status
 ON promotion_evaluations (status);
 
+CREATE INDEX IF NOT EXISTS idx_promotion_evaluations_individual_provenance
+ON promotion_evaluations (project_id, ad_experiment_id, status)
+WHERE ad_experiment_id IS NOT NULL;
+
+ALTER TABLE ad_experiments
+    ADD CONSTRAINT fk_ad_experiments_source_evaluation
+    FOREIGN KEY (source_evaluation_id) REFERENCES promotion_evaluations (evaluation_id);
+
 -- =========================================================
--- 16. User Segment Assignments
+-- 16. Next-loop Preparations
+-- Persists manual next-loop approval attempts before child activation.
+-- =========================================================
+CREATE TABLE IF NOT EXISTS next_loop_preparations (
+    next_loop_preparation_id VARCHAR(100) PRIMARY KEY,
+    source_promotion_run_id VARCHAR(100) NOT NULL,
+    analysis_id VARCHAR(100) NOT NULL,
+    generation_id VARCHAR(100) NOT NULL,
+
+    attempt_no INT NOT NULL,
+    failed_segment_ids_json JSONB NOT NULL,
+    failed_ad_experiment_ids_json JSONB NOT NULL,
+    source_evaluation_ids_json JSONB NOT NULL,
+
+    status VARCHAR(50) NOT NULL,
+    activated_promotion_run_id VARCHAR(100),
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT fk_next_loop_preparations_source_run
+        FOREIGN KEY (source_promotion_run_id) REFERENCES promotion_runs (promotion_run_id),
+
+    CONSTRAINT fk_next_loop_preparations_analysis
+        FOREIGN KEY (analysis_id) REFERENCES promotion_analyses (analysis_id),
+
+    CONSTRAINT fk_next_loop_preparations_generation
+        FOREIGN KEY (generation_id) REFERENCES generation_runs (generation_id),
+
+    CONSTRAINT fk_next_loop_preparations_activated_run
+        FOREIGN KEY (activated_promotion_run_id) REFERENCES promotion_runs (promotion_run_id),
+
+    CONSTRAINT chk_next_loop_preparations_attempt_no
+        CHECK (attempt_no >= 1),
+
+    CONSTRAINT chk_next_loop_preparations_failed_segment_ids_json
+        CHECK (
+            CASE
+                WHEN jsonb_typeof(failed_segment_ids_json) = 'array'
+                THEN jsonb_array_length(failed_segment_ids_json) > 0
+                ELSE false
+            END
+        ),
+
+    CONSTRAINT chk_next_loop_preparations_failed_ad_experiment_ids_json
+        CHECK (
+            CASE
+                WHEN jsonb_typeof(failed_ad_experiment_ids_json) = 'array'
+                THEN jsonb_array_length(failed_ad_experiment_ids_json) > 0
+                ELSE false
+            END
+        ),
+
+    CONSTRAINT chk_next_loop_preparations_source_evaluation_ids_json
+        CHECK (
+            CASE
+                WHEN jsonb_typeof(source_evaluation_ids_json) = 'array'
+                THEN jsonb_array_length(source_evaluation_ids_json) > 0
+                ELSE false
+            END
+        ),
+
+    CONSTRAINT chk_next_loop_preparations_status
+        CHECK (status IN ('awaiting_content_approval', 'rejected', 'activated')),
+
+    CONSTRAINT chk_next_loop_preparations_activation_pair
+        CHECK (
+            (status = 'activated' AND activated_promotion_run_id IS NOT NULL)
+            OR
+            (status IN ('awaiting_content_approval', 'rejected') AND activated_promotion_run_id IS NULL)
+        ),
+
+    CONSTRAINT uq_next_loop_preparations_source_attempt
+        UNIQUE (source_promotion_run_id, attempt_no)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_next_loop_preparations_awaiting_source_run
+ON next_loop_preparations (source_promotion_run_id)
+WHERE status = 'awaiting_content_approval';
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_next_loop_preparations_activated_run
+ON next_loop_preparations (activated_promotion_run_id)
+WHERE activated_promotion_run_id IS NOT NULL;
+
+-- =========================================================
+-- 17. User Segment Assignments
 -- Decision builds these in batch. Dashboard ad serving reads these.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS user_segment_assignments (
@@ -1197,7 +1309,7 @@ CREATE INDEX IF NOT EXISTS idx_user_segment_assignments_ad_experiment_id
 ON user_segment_assignments (ad_experiment_id);
 
 -- =========================================================
--- 17. Ad Dispatch Jobs
+-- 18. Ad Dispatch Jobs
 -- Dashboard-owned email/sms dispatch state.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS ad_dispatch_jobs (
@@ -1256,7 +1368,7 @@ CREATE INDEX IF NOT EXISTS idx_ad_dispatch_jobs_status
 ON ad_dispatch_jobs (status);
 
 -- =========================================================
--- 18. Redirect Links
+-- 19. Redirect Links
 -- Dashboard-owned redirect tracking for email/sms.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS redirect_links (
@@ -1311,7 +1423,7 @@ CREATE INDEX IF NOT EXISTS idx_redirect_links_user_id
 ON redirect_links (user_id);
 
 -- =========================================================
--- 19. Event Validation Errors
+-- 20. Event Validation Errors
 -- Collector/Dashboard can show bad event payloads.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS event_validation_errors (
@@ -1338,7 +1450,7 @@ CREATE INDEX IF NOT EXISTS idx_event_validation_errors_created_at
 ON event_validation_errors (created_at);
 
 -- =========================================================
--- 20. Active Ad Serving Assignments View
+-- 21. Active Ad Serving Assignments View
 -- Dashboard ad hot path uses DB/view; it must not call Decision API per request.
 -- =========================================================
 CREATE OR REPLACE VIEW active_ad_serving_assignments AS
@@ -1376,12 +1488,32 @@ JOIN ad_experiments ae
   ON usa.ad_experiment_id = ae.ad_experiment_id
 JOIN content_candidates cc
   ON usa.content_id = cc.content_id
-WHERE ae.status IN ('approved', 'running')
+-- Re-evaluation may change the latest evaluation result without changing execution state.
+-- Legacy serving therefore requires matching historical provenance, not latest-status equality.
+WHERE (
+        ae.status IN ('approved', 'running')
+        OR
+        (
+            ae.status IN ('goal_met', 'goal_not_met', 'insufficient_data')
+            AND ae.ended_at IS NULL
+            AND EXISTS (
+                SELECT 1
+                FROM promotion_evaluations pe
+                WHERE pe.ad_experiment_id IS NOT NULL
+                  AND pe.project_id = ae.project_id
+                  AND pe.campaign_id = ae.campaign_id
+                  AND pe.promotion_id = ae.promotion_id
+                  AND pe.promotion_run_id = ae.promotion_run_id
+                  AND pe.ad_experiment_id = ae.ad_experiment_id
+                  AND pe.status = ae.status
+            )
+        )
+    )
   AND cc.status IN ('approved', 'active')
   AND (usa.expires_at IS NULL OR usa.expires_at > now());
 
 -- =========================================================
--- 21. SDK Tracking Plans
+-- 22. SDK Tracking Plans
 -- Dashboard-owned draft plans and immutable published revisions.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS tracking_plans (

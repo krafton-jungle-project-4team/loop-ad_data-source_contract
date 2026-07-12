@@ -19,7 +19,9 @@ LoopAd의 로컬 데이터 소스 계약을 공유하는 최소 repo입니다.
 │   ├── dummy.sql
 │   └── schema.sql
 ├── environments/
+│   ├── dashboard.env
 │   └── local.env
+├── docker-compose.local-fixture.yml
 ├── docker-compose.yml
 └── README.md
 ```
@@ -48,9 +50,23 @@ LOOPAD_CLICKHOUSE_PASSWORD=loopad_local_password
 
 `loopad`, `loopad_local_password`는 로컬 개발용 값입니다. 운영 secret이나 실제 password를 이 repo에 넣지 않습니다.
 
+Dashboard local fixture는 기본 Compose와 분리된 PostgreSQL `15433`, ClickHouse HTTP `18124`, Native `19001` 포트를 사용합니다.
+
+```bash
+docker compose \
+  --env-file environments/dashboard.env \
+  -f docker-compose.yml \
+  -f docker-compose.local-fixture.yml \
+  up -d postgres clickhouse
+```
+
+기본 Compose와 운영 환경은 변경하지 않으며, fixture에서만 pgvector 이미지를 사용합니다.
+
 ## 현재 계약 요약
 
-PostgreSQL은 `Campaign -> Promotion -> Segment -> Ad Experiment` 실행 상태를 저장하며, ANN segment matching을 위해 `pgvector` extension을 사용합니다. 핵심 테이블은 `campaigns`, `promotions`, `promotion_analyses`, `promotion_target_segments`, `generation_runs`, `content_candidates`, `promotion_runs`, `ad_experiments`, `promotion_evaluations`, `user_segment_assignments`, `segment_query_previews`, `segment_definitions`입니다.
+PostgreSQL은 `Campaign -> Promotion -> Segment -> Ad Experiment` 실행 상태를 저장하며, ANN segment matching을 위해 `pgvector` extension을 사용합니다. 핵심 테이블은 `campaigns`, `promotions`, `promotion_analyses`, `promotion_target_segments`, `generation_runs`, `content_candidates`, `promotion_runs`, `ad_experiments`, `promotion_evaluations`, `next_loop_preparations`, `user_segment_assignments`, `segment_query_previews`, `segment_definitions`입니다.
+
+Manual next-loop 관련 preparation·child lineage·legacy serving provenance 계약은 `postgres/schema.sql`에 정의합니다. 실제 dev/운영 DB 적용은 별도 운영 절차로 수행하며 migration history는 관리하지 않습니다.
 
 Dashboard의 SDK Tracking Plan은 기존 `projects.write_key`를 공개 connection ID 겸 write key로 사용합니다. `tracking_plans`와 `tracking_plan_events`가 편집 가능한 draft를, `tracking_plan_revisions`가 게시 시점의 immutable JSON snapshot을, `project_sdk_settings`가 허용 Origin과 활성 게시 revision을 보관합니다. 게시 처리는 애플리케이션에서 revision insert와 활성 revision 변경을 같은 transaction으로 실행해야 합니다.
 
@@ -64,7 +80,17 @@ ClickHouse는 `raw_events`를 원천으로 두고 `promotion_touch_events`, `boo
 docker compose --env-file environments/local.env up -d
 ```
 
-PostgreSQL은 `postgres/schema.sql`, ClickHouse는 `clickhouse/schema.sql`을 컨테이너 최초 초기화 시점에 실행합니다.
+기본 Compose는 schema만 실행하며 dummy를 자동 적재하지 않습니다. Local fixture Compose는 PostgreSQL·ClickHouse schema 다음에 각각의 dummy를 실행합니다.
+
+```bash
+docker compose \
+  --env-file environments/dashboard.env \
+  -f docker-compose.yml \
+  -f docker-compose.local-fixture.yml \
+  down -v
+```
+
+위 명령은 local fixture 프로젝트의 PostgreSQL·ClickHouse 볼륨만 삭제합니다. fixture는 manual next-loop와 ClickHouse funnel/booking을 확인하는 로컬 전용 데이터입니다.
 
 ## Expedia train.csv 적재
 
@@ -108,5 +134,6 @@ docker compose --env-file environments/local.env up -d
 ## 원칙
 
 - 이 repo에는 schema contract와 로컬 실행 설정만 둡니다.
-- shell script, dummy data, 팀원별 자동화는 repo 공통 계약에 포함하지 않습니다.
-- 추가 데이터 소스나 seed가 필요해지면 별도 합의 후 파일을 추가합니다.
+- 운영 seed와 backfill은 repo 공통 계약에 포함하지 않습니다.
+- `postgres/dummy.sql`과 local fixture Compose는 Dashboard를 포함한 서비스의 로컬 계약 테스트 전용입니다.
+- 추가 데이터 소스나 운영용 seed가 필요해지면 별도 합의 후 파일을 추가합니다.
