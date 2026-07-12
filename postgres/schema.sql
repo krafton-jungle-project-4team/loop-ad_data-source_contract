@@ -19,6 +19,7 @@
 BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- =========================================================
 -- 0. Projects
@@ -742,6 +743,8 @@ CREATE TABLE IF NOT EXISTS promotion_runs (
     loop_count INT NOT NULL DEFAULT 1,
     status VARCHAR(50) NOT NULL DEFAULT 'planned',
     goal_snapshot_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    segment_scope_json JSONB NOT NULL,
+    segment_scope_fingerprint VARCHAR(64) NOT NULL,
 
     started_at TIMESTAMPTZ,
     ended_at TIMESTAMPTZ,
@@ -779,8 +782,24 @@ CREATE TABLE IF NOT EXISTS promotion_runs (
     CONSTRAINT chk_promotion_runs_loop_count
         CHECK (loop_count >= 1),
 
-    CONSTRAINT uq_promotion_runs_loop
-        UNIQUE (promotion_id, loop_count)
+    CONSTRAINT chk_promotion_runs_segment_scope_json
+        CHECK (
+            jsonb_typeof(segment_scope_json) = 'array'
+            AND jsonb_array_length(segment_scope_json) >= 1
+        ),
+
+    CONSTRAINT chk_promotion_runs_segment_scope_fingerprint
+        CHECK (segment_scope_fingerprint ~ '^[0-9a-f]{64}$'),
+
+    CONSTRAINT uq_promotion_runs_segment_scope
+        UNIQUE (
+            project_id,
+            promotion_id,
+            analysis_id,
+            generation_id,
+            segment_scope_fingerprint,
+            loop_count
+        )
 );
 
 CREATE INDEX IF NOT EXISTS idx_promotion_runs_project_id
@@ -791,6 +810,9 @@ ON promotion_runs (campaign_id);
 
 CREATE INDEX IF NOT EXISTS idx_promotion_runs_promotion_id
 ON promotion_runs (promotion_id);
+
+CREATE INDEX IF NOT EXISTS idx_promotion_runs_promotion_loop
+ON promotion_runs (promotion_id, loop_count);
 
 CREATE INDEX IF NOT EXISTS idx_promotion_runs_status
 ON promotion_runs (status);
