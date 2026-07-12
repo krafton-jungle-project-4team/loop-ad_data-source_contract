@@ -702,14 +702,16 @@ INSERT INTO promotion_runs (
     loop_count,
     status,
     goal_snapshot_json,
+    segment_scope_json,
+    segment_scope_fingerprint,
     started_at,
     ended_at
 )
 VALUES
-('run_email_a1', 'demo_project', 'camp_expedia_hotel_demo', 'promo_expedia_email_reactivation', 'analysis_email_a1', 'generation_email_a1', 1, 'goal_not_met', '{"goal_metric":"booking_conversion_rate","target":0.05}'::jsonb, now() - interval '3 days', NULL),
-('run_onsite_a1', 'demo_project', 'camp_expedia_hotel_demo', 'promo_expedia_onsite_last_minute', 'analysis_onsite_a1', 'generation_onsite_a1', 1, 'stopped', '{"goal_metric":"inflow_rate","target":0.08}'::jsonb, now() - interval '2 days', now() - interval '2 hours'),
-('run_onsite_a2', 'demo_project', 'camp_expedia_hotel_demo', 'promo_expedia_onsite_last_minute', 'analysis_onsite_a2', 'generation_onsite_a2', 2, 'running', '{"goal_metric":"inflow_rate","target":0.08}'::jsonb, now() - interval '1 hour', NULL),
-('run_sms_a1', 'demo_project', 'camp_expedia_hotel_demo', 'promo_expedia_sms_near_checkin', 'analysis_sms_a1', 'generation_sms_a1', 1, 'goal_not_met', '{"goal_metric":"booking_conversion_rate","target":0.04}'::jsonb, now() - interval '1 day', NULL)
+('run_email_a1', 'demo_project', 'camp_expedia_hotel_demo', 'promo_expedia_email_reactivation', 'analysis_email_a1', 'generation_email_a1', 1, 'goal_not_met', '{"goal_metric":"booking_conversion_rate","target":0.05}'::jsonb, '["seg_mobile_user"]'::jsonb, '59c1fd8d7001d9f77e747d9cbac6c67bcf7b9f217bb884bf1844a9dc4a79c626', now() - interval '3 days', NULL),
+('run_onsite_a1', 'demo_project', 'camp_expedia_hotel_demo', 'promo_expedia_onsite_last_minute', 'analysis_onsite_a1', 'generation_onsite_a1', 1, 'stopped', '{"goal_metric":"inflow_rate","target":0.08}'::jsonb, '["seg_near_checkin"]'::jsonb, '254dece18876fe5e844634faad372e1c614fc990c55041b6fa5d10865bbb623d', now() - interval '2 days', now() - interval '2 hours'),
+('run_onsite_a2', 'demo_project', 'camp_expedia_hotel_demo', 'promo_expedia_onsite_last_minute', 'analysis_onsite_a2', 'generation_onsite_a2', 2, 'running', '{"goal_metric":"inflow_rate","target":0.08}'::jsonb, '["seg_near_checkin"]'::jsonb, '254dece18876fe5e844634faad372e1c614fc990c55041b6fa5d10865bbb623d', now() - interval '1 hour', NULL),
+('run_sms_a1', 'demo_project', 'camp_expedia_hotel_demo', 'promo_expedia_sms_near_checkin', 'analysis_sms_a1', 'generation_sms_a1', 1, 'goal_not_met', '{"goal_metric":"booking_conversion_rate","target":0.04}'::jsonb, '["seg_family_trip","seg_near_checkin"]'::jsonb, 'ddb2d4e90789ba02f9868ab17bf57c27f98f7d22a8f327d1817cc962f81a7ed8', now() - interval '1 day', NULL)
 ON CONFLICT (promotion_run_id) DO UPDATE SET
     project_id = EXCLUDED.project_id,
     campaign_id = EXCLUDED.campaign_id,
@@ -719,6 +721,8 @@ ON CONFLICT (promotion_run_id) DO UPDATE SET
     loop_count = EXCLUDED.loop_count,
     status = EXCLUDED.status,
     goal_snapshot_json = EXCLUDED.goal_snapshot_json,
+    segment_scope_json = EXCLUDED.segment_scope_json,
+    segment_scope_fingerprint = EXCLUDED.segment_scope_fingerprint,
     started_at = EXCLUDED.started_at,
     ended_at = EXCLUDED.ended_at,
     updated_at = now();
