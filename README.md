@@ -50,14 +50,14 @@ LOOPAD_CLICKHOUSE_PASSWORD=loopad_local_password
 
 `loopad`, `loopad_local_password`는 로컬 개발용 값입니다. 운영 secret이나 실제 password를 이 repo에 넣지 않습니다.
 
-Dashboard에서 manual next-loop를 확인하려면 기본 Compose와 분리된 local fixture 환경을 사용합니다. 기본 PostgreSQL과 동시에 실행할 수 있도록 fixture PostgreSQL 포트는 `15433`을 사용합니다.
+Dashboard에서 manual next-loop를 확인하려면 기본 Compose와 분리된 local fixture 환경을 사용합니다. 기본 PostgreSQL·ClickHouse와 동시에 실행할 수 있도록 fixture 포트는 PostgreSQL `15433`, ClickHouse HTTP `18124`, ClickHouse Native `19001`을 사용합니다.
 
 ```bash
 docker compose \
   --env-file environments/dashboard.env \
   -f docker-compose.yml \
   -f docker-compose.local-fixture.yml \
-  up -d postgres
+  up -d postgres clickhouse
 ```
 
 기본 Compose는 PostgreSQL 16.13 Alpine 이미지를 사용합니다. Local fixture는 PostgreSQL 16 계열과 pgvector 0.8.0이 포함된 `pgvector/pgvector:0.8.0-pg16` 이미지를 선택적으로 사용합니다. 따라서 fixture 이미지의 PostgreSQL patch version을 16.13으로 간주하지 않습니다.
@@ -86,7 +86,7 @@ docker compose --env-file environments/local.env up -d
 
 기본 Compose에서는 PostgreSQL의 `postgres/schema.sql`, ClickHouse의 `clickhouse/schema.sql`을 컨테이너 최초 초기화 시점에 실행합니다. 기본 Compose는 운영·공용 계약용 환경이므로 dummy 데이터를 자동 적재하지 않습니다.
 
-Local fixture Compose에서는 `postgres/schema.sql` 다음에 `postgres/dummy.sql`을 실행합니다. fixture 데이터는 새 local fixture 볼륨을 최초 초기화할 때만 적재되며, 이미 사용 중인 볼륨을 다시 시작한다고 데이터가 덮어써지지 않습니다.
+Local fixture Compose에서는 PostgreSQL의 `postgres/schema.sql` 다음 `postgres/dummy.sql`, ClickHouse의 `clickhouse/schema.sql` 다음 `clickhouse/dummy.sql`을 실행합니다. ClickHouse dummy는 raw event를 넣고 기존 Materialized View를 통해 typed event를 생성합니다. fixture 데이터는 새 local fixture 볼륨을 최초 초기화할 때만 적재되며, 이미 사용 중인 볼륨을 다시 시작한다고 데이터가 덮어써지지 않습니다.
 
 Fixture 데이터를 초기화하려면 반드시 local fixture 설정을 함께 지정합니다.
 
@@ -98,22 +98,24 @@ docker compose \
   down -v
 ```
 
-위 명령은 `loop-ad_data-source_contract-local-fixture` 프로젝트의 컨테이너와 볼륨만 삭제합니다. 기본 Compose의 `15432` PostgreSQL 데이터와는 별개입니다.
+위 명령은 `loop-ad_data-source_contract-local-fixture` 프로젝트의 PostgreSQL·ClickHouse 컨테이너와 볼륨만 삭제합니다. 기본 Compose의 PostgreSQL `15432`, ClickHouse `18123/19000` 데이터와는 별개입니다.
 
 Local fixture에는 다음 Dashboard 확인 시나리오가 포함됩니다.
 
 | 시나리오 | 확인할 내용 |
 |---|---|
-| Email reactivation | A2 승인 대기 중 A1 serving 유지, generation별 후보 조회 |
-| Onsite last-minute | A1 종료 후 parent/source lineage가 있는 A2만 serving |
-| SMS near check-in | preparation 거절 유지, provenance 없는 `insufficient_data` 제외 |
+| Email reactivation | A2 승인 대기 중 A1 serving 유지, generation별 후보와 impression/click/landing 확인 |
+| Onsite last-minute | A1 종료 후 parent/source lineage가 있는 A2만 serving, detail/booking 완료 확인 |
+| SMS near check-in | preparation 거절 유지, provenance 없는 `insufficient_data` 제외, booking 취소 확인 |
+
+ClickHouse 이벤트 흐름은 Email `impression → click → landing → booking start`, Onsite A2 `impression → click → hotel detail → booking start → booking complete`, SMS `impression → click → booking cancel` 순서입니다. PostgreSQL과 동일한 `project_id`, `promotion_run_id`, `ad_experiment_id`, `user_id`를 사용합니다.
 
 Fixture의 evaluation row는 최신 individual evaluation을 결정적으로 선택할 수 있는 데이터를 제공합니다. 실제 `ORDER BY created_at DESC, evaluation_id DESC` 사용 여부는 Dashboard 저장소 테스트 책임입니다.
 
 ### Dashboard 담당자용 실행 순서
 
-1. `environments/dashboard.env`의 PostgreSQL URL을 사용해 Dashboard를 `localhost:15433`에 연결합니다.
-2. 위의 local fixture `up -d postgres` 명령으로 DB를 실행합니다.
+1. `environments/dashboard.env`의 PostgreSQL URL을 `localhost:15433`, ClickHouse URL을 `http://localhost:18124`로 연결합니다.
+2. 위의 local fixture `up -d postgres clickhouse` 명령으로 DB를 실행합니다.
 3. 아래 테스트 사용자를 순서대로 조회합니다.
 
 | 테스트 사용자 | 기대 결과 |
@@ -141,7 +143,7 @@ docker compose \
   down -v
 ```
 
-이 명령은 Dashboard local fixture 데이터만 삭제합니다. 기본 Compose의 PostgreSQL `15432` 데이터는 삭제하지 않습니다.
+이 명령은 Dashboard local fixture의 PostgreSQL·ClickHouse 데이터만 삭제합니다. 기본 Compose의 PostgreSQL `15432`, ClickHouse `18123/19000` 데이터는 삭제하지 않습니다.
 
 ## 실제 DB 적용 전 확인 사항
 

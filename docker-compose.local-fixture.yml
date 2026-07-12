@@ -5,3 +5,7 @@ services:
     image: pgvector/pgvector:0.8.0-pg16
     volumes:
       - ./postgres/dummy.sql:/docker-entrypoint-initdb.d/02-dummy.sql:ro
+
+  clickhouse:
+    volumes:
+      - ./clickhouse/dummy.sql:/docker-entrypoint-initdb.d/02-dummy.sql:ro
