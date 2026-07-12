@@ -19,7 +19,9 @@ LoopAd의 로컬 데이터 소스 계약을 공유하는 최소 repo입니다.
 │   ├── dummy.sql
 │   └── schema.sql
 ├── environments/
+│   ├── dashboard.env
 │   └── local.env
+├── docker-compose.local-fixture.yml
 ├── docker-compose.yml
 └── README.md
 ```
@@ -48,6 +50,18 @@ LOOPAD_CLICKHOUSE_PASSWORD=loopad_local_password
 
 `loopad`, `loopad_local_password`는 로컬 개발용 값입니다. 운영 secret이나 실제 password를 이 repo에 넣지 않습니다.
 
+Dashboard에서 manual next-loop를 확인하려면 기본 Compose와 분리된 local fixture 환경을 사용합니다. 기본 PostgreSQL과 동시에 실행할 수 있도록 fixture PostgreSQL 포트는 `15433`을 사용합니다.
+
+```bash
+docker compose \
+  --env-file environments/dashboard.env \
+  -f docker-compose.yml \
+  -f docker-compose.local-fixture.yml \
+  up -d postgres
+```
+
+기본 Compose는 PostgreSQL 16.13 Alpine 이미지를 사용합니다. Local fixture는 PostgreSQL 16 계열과 pgvector 0.8.0이 포함된 `pgvector/pgvector:0.8.0-pg16` 이미지를 선택적으로 사용합니다. 따라서 fixture 이미지의 PostgreSQL patch version을 16.13으로 간주하지 않습니다.
+
 ## 현재 계약 요약
 
 PostgreSQL은 `Campaign -> Promotion -> Segment -> Ad Experiment` 실행 상태를 저장하며, ANN segment matching을 위해 `pgvector` extension을 사용합니다. 핵심 테이블은 `campaigns`, `promotions`, `promotion_analyses`, `promotion_target_segments`, `generation_runs`, `content_candidates`, `promotion_runs`, `ad_experiments`, `promotion_evaluations`, `next_loop_preparations`, `user_segment_assignments`, `segment_query_previews`, `segment_definitions`입니다.
@@ -70,7 +84,31 @@ ClickHouse는 `raw_events`를 원천으로 두고 `promotion_touch_events`, `boo
 docker compose --env-file environments/local.env up -d
 ```
 
-PostgreSQL은 `postgres/schema.sql`, ClickHouse는 `clickhouse/schema.sql`을 컨테이너 최초 초기화 시점에 실행합니다.
+기본 Compose에서는 PostgreSQL의 `postgres/schema.sql`, ClickHouse의 `clickhouse/schema.sql`을 컨테이너 최초 초기화 시점에 실행합니다. 기본 Compose는 운영·공용 계약용 환경이므로 dummy 데이터를 자동 적재하지 않습니다.
+
+Local fixture Compose에서는 `postgres/schema.sql` 다음에 `postgres/dummy.sql`을 실행합니다. fixture 데이터는 새 local fixture 볼륨을 최초 초기화할 때만 적재되며, 이미 사용 중인 볼륨을 다시 시작한다고 데이터가 덮어써지지 않습니다.
+
+Fixture 데이터를 초기화하려면 반드시 local fixture 설정을 함께 지정합니다.
+
+```bash
+docker compose \
+  --env-file environments/dashboard.env \
+  -f docker-compose.yml \
+  -f docker-compose.local-fixture.yml \
+  down -v
+```
+
+위 명령은 `loop-ad_data-source_contract-local-fixture` 프로젝트의 컨테이너와 볼륨만 삭제합니다. 기본 Compose의 `15432` PostgreSQL 데이터와는 별개입니다.
+
+Local fixture에는 다음 Dashboard 확인 시나리오가 포함됩니다.
+
+| 시나리오 | 확인할 내용 |
+|---|---|
+| Email reactivation | A2 승인 대기 중 A1 serving 유지, generation별 후보 조회 |
+| Onsite last-minute | A1 종료 후 parent/source lineage가 있는 A2만 serving |
+| SMS near check-in | preparation 거절 유지, provenance 없는 `insufficient_data` 제외 |
+
+Fixture의 evaluation row는 최신 individual evaluation을 결정적으로 선택할 수 있는 데이터를 제공합니다. 실제 `ORDER BY created_at DESC, evaluation_id DESC` 사용 여부는 Dashboard 저장소 테스트 책임입니다.
 
 ## Expedia train.csv 적재
 
@@ -114,5 +152,6 @@ docker compose --env-file environments/local.env up -d
 ## 원칙
 
 - 이 repo에는 schema contract와 로컬 실행 설정만 둡니다.
-- shell script, dummy data, 팀원별 자동화는 repo 공통 계약에 포함하지 않습니다.
-- 추가 데이터 소스나 seed가 필요해지면 별도 합의 후 파일을 추가합니다.
+- 운영 seed와 backfill은 repo 공통 계약에 포함하지 않습니다.
+- `postgres/dummy.sql`과 local fixture Compose는 Dashboard를 포함한 서비스의 로컬 계약 테스트 전용입니다.
+- 추가 데이터 소스나 운영용 seed가 필요해지면 별도 합의 후 파일을 추가합니다.
