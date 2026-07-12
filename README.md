@@ -17,6 +17,9 @@ LoopAd의 로컬 데이터 소스 계약을 공유하는 최소 repo입니다.
 │   └── schema.sql
 ├── postgres/
 │   ├── dummy.sql
+│   ├── expand_promotion_run_segment_scope.sql
+│   ├── backfill_promotion_run_segment_scope.sql
+│   ├── finalize_promotion_run_segment_scope.sql
 │   └── schema.sql
 ├── environments/
 │   ├── dashboard.env
@@ -67,6 +70,19 @@ docker compose \
 PostgreSQL은 `Campaign -> Promotion -> Segment -> Ad Experiment` 실행 상태를 저장하며, ANN segment matching을 위해 `pgvector` extension을 사용합니다. 핵심 테이블은 `campaigns`, `promotions`, `promotion_analyses`, `promotion_target_segments`, `generation_runs`, `content_candidates`, `promotion_runs`, `ad_experiments`, `promotion_evaluations`, `next_loop_preparations`, `user_segment_assignments`, `segment_query_previews`, `segment_definitions`입니다.
 
 Manual next-loop 관련 preparation·child lineage·legacy serving provenance 계약은 `postgres/schema.sql`에 정의합니다. 실제 dev/운영 DB 적용은 별도 운영 절차로 수행하며 migration history는 관리하지 않습니다.
+
+Promotion run은 `project_id + promotion_id + analysis_id + generation_id + normalized segment_ids + loop_count` 범위로 유일합니다. Fingerprint는 fallback을 제외하고 중복 제거·오름차순 정렬한 `segment_ids` 배열만 공백 없는 JSON으로 UTF-8 직렬화한 뒤 SHA-256으로 계산합니다. 나머지 필드는 named composite UNIQUE가 담당합니다.
+
+기존 DB는 아래 순서로 안전하게 전환합니다. 각 SQL은 재실행 가능하며 운영 migration history를 대체하지 않습니다.
+
+1. `postgres/expand_promotion_run_segment_scope.sql`
+2. scope 컬럼을 dual-write하는 Decision 배포 (`LOOPAD_PARTIAL_PROMOTION_RUN_SCOPE_ENABLED=false`)
+3. `postgres/backfill_promotion_run_segment_scope.sql`
+4. `postgres/finalize_promotion_run_segment_scope.sql`
+5. Dashboard의 scope·lineage 기반 reader 배포
+6. `LOOPAD_PARTIAL_PROMOTION_RUN_SCOPE_ENABLED=true`
+
+기본 flag가 꺼진 동안 명시적 부분 scope run과 failed-only automatic next-loop는 409로 차단합니다. 따라서 Dashboard가 더 이상 `promotion_id + loop_count + LIMIT 1`에 의존하지 않는 것이 확인된 뒤에만 flag를 켭니다.
 
 Dashboard의 SDK Tracking Plan은 기존 `projects.write_key`를 공개 connection ID 겸 write key로 사용합니다. `tracking_plans`와 `tracking_plan_events`가 편집 가능한 draft를, `tracking_plan_revisions`가 게시 시점의 immutable JSON snapshot을, `project_sdk_settings`가 허용 Origin과 활성 게시 revision을 보관합니다. 게시 처리는 애플리케이션에서 revision insert와 활성 revision 변경을 같은 transaction으로 실행해야 합니다.
 
