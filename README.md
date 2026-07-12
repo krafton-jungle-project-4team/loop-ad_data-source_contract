@@ -110,6 +110,84 @@ Local fixture에는 다음 Dashboard 확인 시나리오가 포함됩니다.
 
 Fixture의 evaluation row는 최신 individual evaluation을 결정적으로 선택할 수 있는 데이터를 제공합니다. 실제 `ORDER BY created_at DESC, evaluation_id DESC` 사용 여부는 Dashboard 저장소 테스트 책임입니다.
 
+### Dashboard 담당자용 실행 순서
+
+1. `environments/dashboard.env`의 PostgreSQL URL을 사용해 Dashboard를 `localhost:15433`에 연결합니다.
+2. 위의 local fixture `up -d postgres` 명령으로 DB를 실행합니다.
+3. 아래 테스트 사용자를 순서대로 조회합니다.
+
+| 테스트 사용자 | 기대 결과 |
+|---|---|
+| `demo_user_email_awaiting` | `exp_email_a1_mobile`만 조회되고, A2 후보는 승인 대기 상태 |
+| `demo_user_onsite_cutover` | A1은 보이지 않고 `exp_onsite_a2_near`만 조회 |
+| `demo_user_sms_rejected` | 거절된 preparation과 A1 serving 확인 |
+| `demo_user_sms_no_provenance` | serving 결과 없음. 평가 provenance 없는 `insufficient_data` 사례 |
+
+4. preparation 화면에서는 다음 ID를 사용합니다.
+
+| preparation | 상태 | 용도 |
+|---|---|---|
+| `prep_email_next_loop_01` | `awaiting_content_approval` | generation별 후보 승인 화면 |
+| `prep_onsite_next_loop_01` | `activated` | A1→A2 전환 결과 화면 |
+| `prep_sms_next_loop_01` | `rejected` | 거절 및 A1 유지 화면 |
+
+5. fixture를 다시 처음 상태로 만들 때만 다음 초기화 명령을 실행합니다.
+
+```bash
+docker compose \
+  --env-file environments/dashboard.env \
+  -f docker-compose.yml \
+  -f docker-compose.local-fixture.yml \
+  down -v
+```
+
+이 명령은 Dashboard local fixture 데이터만 삭제합니다. 기본 Compose의 PostgreSQL `15432` 데이터는 삭제하지 않습니다.
+
+## 실제 DB 적용 전 확인 사항
+
+아래 항목은 Contract PR merge 조건이 아닙니다. 실제 dev DB에 DDL을 적용하고 manual next-loop 기능을 켜기 전에 Dashboard·Decision·DB/Infra 담당자가 함께 확인해야 합니다.
+
+- [ ] **[Dashboard] 후보를 같은 generation에서만 승인**
+  - preparation의 `generation_id`와 후보의 `generation_id`가 같은지 확인합니다.
+  - 다른 generation의 후보를 섞은 승인 요청은 거절되어야 합니다.
+
+- [ ] **[Dashboard] preparation ID로 요청·새로고침·재시도**
+  - 활성화 요청에 `next_loop_preparation_id`를 보냅니다.
+  - 응답이 끊겨 재시도할 때 새 preparation이나 A2를 만들지 않고 같은 ID로 다시 조회합니다.
+
+- [ ] **[Dashboard] 최신 개별 평가를 항상 같은 방식으로 조회**
+  - aggregate 평가(`ad_experiment_id IS NULL`)는 제외합니다.
+  - `ORDER BY created_at DESC, evaluation_id DESC`로 최신 row를 선택합니다.
+  - 최신 평가 status와 experiment status가 달라도 화면에 표시할 수 있어야 합니다.
+
+- [ ] **[Decision] preparation과 A1→A2 관계 저장**
+  - preparation row가 저장되어야 합니다.
+  - A2의 `parent_ad_experiment_id`, `source_evaluation_id`가 함께 저장되어야 합니다.
+  - Dashboard는 응답과 재조회에서 이 ID들을 잃지 않아야 합니다.
+
+- [ ] **[공동] A2 준비·A1 종료·preparation 활성화를 한 번에 처리**
+  - 성공하면 A1은 종료되고 A2만 serving되어야 합니다.
+  - 실패하면 A2 변경은 모두 취소되고 A1만 계속 serving되어야 합니다.
+
+- [ ] **[Decision/DB] 기존 evaluation·assignment 데이터 출처 점검**
+  - 기존 `insufficient_data`가 실제 개별 평가에서 나온 것인지 확인합니다.
+  - 평가 기록이 없는 assignment-origin row가 새 view에 노출되지 않아야 합니다.
+
+- [ ] **[DB/Dashboard] 실제 dev 데이터 크기로 조회 성능 확인**
+  - Dashboard serving 조회에 `EXPLAIN (ANALYZE, BUFFERS)`를 실행합니다.
+  - evaluation 전체 scan이나 assignment 수에 따른 비정상 반복 조회가 없어야 합니다.
+
+- [ ] **[공동] A1과 A2가 동시에 serving되지 않는지 확인**
+  - A2 준비 전에는 A1만 조회됩니다.
+  - 활성화 성공 후에는 A2만 조회됩니다.
+  - 활성화 실패·재시도·동시 요청에서도 A1/A2 중복과 child 중복이 없어야 합니다.
+
+- [ ] **[DB/Infra] 운영 DDL 적용 순서와 책임 확인**
+  - DB/Infra owner가 별도 운영 DDL을 리뷰하고 dev DB에 적용합니다.
+  - 이 Contract repo의 merge나 git revert만으로 운영 DB가 변경·복구된다고 가정하지 않습니다.
+
+모든 항목이 확인되기 전까지 manual next-loop 기능은 OFF로 유지합니다.
+
 ## Expedia train.csv 적재
 
 Kaggle Expedia `train.csv`는 repo에 커밋하지 않고 로컬 파일로만 둡니다. 기본 위치는 `clickhouse/train.csv`입니다.
