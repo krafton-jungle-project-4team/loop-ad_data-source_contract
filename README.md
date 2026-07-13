@@ -9,22 +9,29 @@ LoopAd의 로컬 데이터 소스 계약을 공유하는 최소 repo입니다.
 ```text
 .
 ├── clickhouse/
+│   ├── backfill_user_behavior_vector_revisions.sql
 │   ├── build_user_behavior_vectors_from_expedia.sql
 │   ├── database.sql
 │   ├── drop.sql
+│   ├── expand_user_behavior_vector_revisions.sql
 │   ├── load_train_csv.sh
 │   ├── named-collection.example.sql
+│   ├── tests/
+│   │   └── verify_user_behavior_vector_revisions.sql
 │   └── schema.sql
 ├── postgres/
 │   ├── dummy.sql
+│   ├── expand_segment_assignment_execution_provenance.sql
 │   ├── expand_promotion_run_segment_scope.sql
 │   ├── backfill_promotion_run_segment_scope.sql
 │   ├── finalize_promotion_run_segment_scope.sql
 │   ├── tests/
 │   │   ├── repair_legacy_fixture_fallbacks.sql
-│   │   └── verify_promotion_run_segment_scope.sql
+│   │   ├── verify_promotion_run_segment_scope.sql
+│   │   └── verify_segment_assignment_execution_provenance.sql
 │   └── schema.sql
 ├── scripts/
+│   ├── verify_clickhouse_contract.sh
 │   └── verify_postgres_contract.sh
 ├── environments/
 │   ├── dashboard.env
@@ -83,6 +90,126 @@ Promotion run의 full composite identity는 `project_id + promotion_id + analysi
 Dashboard의 SDK Tracking Plan은 기존 `projects.write_key`를 공개 connection ID 겸 write key로 사용합니다. `tracking_plans`와 `tracking_plan_events`가 편집 가능한 draft를, `tracking_plan_revisions`가 게시 시점의 immutable JSON snapshot을, `project_sdk_settings`가 허용 Origin과 활성 게시 revision을 보관합니다. 게시 처리는 애플리케이션에서 revision insert와 활성 revision 변경을 같은 transaction으로 실행해야 합니다.
 
 ClickHouse는 `raw_events`를 원천으로 두고 `promotion_touch_events`, `booking_outcome_events`, `hotel_detail_events`, `funnel_step_events`, `hotel_marketing_profiles`, `user_behavior_vectors`를 제공합니다. 이벤트 이름은 호텔 예약 도메인 기준의 `hotel_search`, `hotel_click`, `hotel_detail_view`, `booking_start`, `booking_complete`, `booking_cancel`, `promotion_impression`, `promotion_click`, `campaign_redirect_click`, `campaign_landing`을 사용합니다.
+
+## Segment assignment execution provenance
+
+`segment_assignment_executions`는 비동기 build lifecycle이 아니라 한 번의 matcher
+실행에 사용한 요청, 입력, matcher와 cutoff를 기록하는 최소 provenance table입니다.
+`user_segment_assignments.segment_assignment_execution_id`는 nullable FK이므로 기존
+assignment row는 모두 `NULL`을 유지합니다. 기존 producer는 이 컬럼을 생략할 수
+있으며 `active_ad_serving_assignments` 정의와 hot path는 변경하지 않습니다.
+
+실행 row의 `request_fingerprint`와 `input_fingerprint`는 lowercase SHA-256이고,
+`input_manifest_json`은 JSON object입니다. 동일 run에서 같은 request fingerprint는
+한 execution만 허용합니다. Matcher 전략 이름은 Decision이 소유하므로 DB에서 enum
+CHECK로 닫지 않습니다. 새 assignment를 provenance에 연결할 때는 execution insert와
+assignment write를 같은 애플리케이션 transaction에서 수행합니다.
+
+기준 schema에 additive expand를 적용하려면 다음 파일을 사용합니다.
+
+```bash
+psql -v ON_ERROR_STOP=1 \
+  -f postgres/expand_segment_assignment_execution_provenance.sql
+```
+
+이 계약에는 status, lifecycle 함수, staging result, publication pointer, trigger 또는
+신규 serving view가 없습니다.
+
+## Deterministic user behavior vector revisions
+
+기존 `user_behavior_vectors`는 ingestion과 기존 consumer를 위해 그대로 유지합니다.
+`mv_user_behavior_vectors_to_revisions`는 이후 INSERT를 append-only
+`user_behavior_vector_revisions`에 복제합니다. `vector_row_id`는 random UUID가
+아니며 다음 순서의 canonical JSON tuple을 SHA-256한 lowercase hex 문자열입니다.
+
+```text
+project_id
+user_id
+vector_version
+toUnixTimestamp64Milli(updated_at)
+vector_dim
+vector_values
+source as String
+toUnixTimestamp64Milli(window_start)
+toUnixTimestamp64Milli(window_end)
+```
+
+기존 visible vector는 MV 생성 뒤 자동 복제되지 않으므로 expand 이후 backfill을
+실행합니다. Backfill은 `user_behavior_vectors FINAL`의 실행 시점 visible state만
+initial baseline으로 취급합니다. 기존 `ReplacingMergeTree`가 이미 제거한 historical
+row를 복구한다고 주장하지 않습니다. 동일 payload의 반복 backfill은 같은
+`vector_row_id`를 생성하므로 physical duplicate가 생겨도 canonical latest payload는
+달라지지 않습니다.
+
+```bash
+clickhouse-client --multiquery \
+  < clickhouse/expand_user_behavior_vector_revisions.sql
+clickhouse-client --multiquery \
+  < clickhouse/backfill_user_behavior_vector_revisions.sql
+```
+
+Decision의 `list_by_user_ids()`와 `list_for_project()`는 아래 aggregation을 공유해야
+합니다. 두 메서드는 user selection predicate만 다르며 `source`가 지정되면 반드시
+`argMax` 이전 `WHERE`에 추가합니다. Cutoff는 inclusive가 아니라
+`ingested_at < source_cutoff_at`입니다.
+
+```sql
+SELECT
+    project_id,
+    user_id,
+    vector_version,
+    tupleElement(selected_payload, 1) AS vector_dim,
+    tupleElement(selected_payload, 2) AS vector_values,
+    tupleElement(selected_payload, 3) AS source,
+    tupleElement(selected_payload, 4) AS window_start,
+    tupleElement(selected_payload, 5) AS window_end,
+    tupleElement(selected_payload, 6) AS updated_at,
+    tupleElement(selected_payload, 7) AS vector_row_id
+FROM (
+    SELECT
+        project_id,
+        user_id,
+        vector_version,
+        argMax(
+            tuple(
+                vector_dim,
+                vector_values,
+                CAST(source, 'String'),
+                window_start,
+                window_end,
+                updated_at,
+                vector_row_id
+            ),
+            tuple(updated_at, vector_row_id)
+        ) AS selected_payload
+    FROM user_behavior_vector_revisions
+    WHERE project_id = {project_id:String}
+      AND vector_version = {vector_version:String}
+      AND ingested_at < {source_cutoff_at:DateTime64(6, 'UTC')}
+      -- source가 지정되면: AND source = {source:String}
+      -- explicit list: AND user_id IN {user_ids:Array(String)}
+      -- project keyset: AND tuple(user_id, vector_version) > (...)
+    GROUP BY project_id, user_id, vector_version
+)
+ORDER BY user_id, vector_version;
+```
+
+Payload 컬럼마다 별도 `argMax`를 사용하면 동일 winner key에서 서로 다른 physical
+row의 값이 섞일 수 있으므로 금지합니다. Winner key는 항상
+`tuple(updated_at, vector_row_id)`입니다. PostgreSQL execution의
+`source_cutoff_at`, `vector_version`, `input_fingerprint`, `input_manifest_json`은 이
+canonical input selection을 재현하는 provenance입니다.
+
+격리된 PostgreSQL과 ClickHouse에서 fresh/migrated/backfill 계약을 검증합니다.
+
+```bash
+BASE_REF=origin/main \
+EXECUTION_BASE_REF=ca4f456f40255ec758937a8c84ea7f5566cc9d0a \
+./scripts/verify_postgres_contract.sh
+
+CLICKHOUSE_BASE_REF=ca4f456f40255ec758937a8c84ea7f5566cc9d0a \
+./scripts/verify_clickhouse_contract.sh
+```
 
 ## Promotion run segment scope 전환
 
