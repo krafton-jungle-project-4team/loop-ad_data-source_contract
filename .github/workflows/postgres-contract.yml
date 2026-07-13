@@ -1,0 +1,31 @@
+name: PostgreSQL contract
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/postgres-contract.yml"
+      - "postgres/**"
+      - "scripts/verify_postgres_contract.sh"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/postgres-contract.yml"
+      - "postgres/**"
+      - "scripts/verify_postgres_contract.sh"
+
+permissions:
+  contents: read
+
+jobs:
+  verify-postgres-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify fresh schema, dummy data, and migrations
+        env:
+          BASE_REF: origin/${{ github.base_ref || 'main' }}
+        run: ./scripts/verify_postgres_contract.sh
