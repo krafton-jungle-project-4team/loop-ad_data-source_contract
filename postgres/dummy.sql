@@ -207,7 +207,7 @@ INSERT INTO segment_definitions (
 VALUES
 (
     'seg_existing_all',
-    'demo_project',
+    NULL,
     NULL,
     NULL,
     'All existing hotel users',
@@ -342,7 +342,10 @@ VALUES
     'active'
 )
 ON CONFLICT (segment_id) DO UPDATE SET
-    project_id = EXCLUDED.project_id,
+    project_id = CASE
+        WHEN segment_definitions.segment_id = 'seg_existing_all' THEN NULL
+        ELSE EXCLUDED.project_id
+    END,
     campaign_id = EXCLUDED.campaign_id,
     promotion_id = EXCLUDED.promotion_id,
     segment_name = EXCLUDED.segment_name,
