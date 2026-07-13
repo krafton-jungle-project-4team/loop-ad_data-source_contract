@@ -144,6 +144,52 @@ SELECT (
 )::int;
 " '1'
 
+log 'confirming fallback-missing backfill failure and transaction rollback'
+backfill_failure_output=''
+if backfill_failure_output="$(psql_file \
+    "${LEGACY_DB}" \
+    "${ROOT_DIR}/postgres/backfill_promotion_run_segment_scope.sql" 2>&1)"; then
+    printf 'backfill unexpectedly succeeded without fallback experiments\n' >&2
+    exit 1
+fi
+printf '%s\n' "${backfill_failure_output}"
+
+if [[ "${backfill_failure_output}" != *'[fallback_experiment_count]'* \
+      || "${backfill_failure_output}" != *'promotion_run_id=run_email_a1'* ]]; then
+    printf 'backfill failure did not identify fallback damage and a run ID\n' >&2
+    exit 1
+fi
+
+assert_query "${LEGACY_DB}" "
+SELECT (
+    NOT EXISTS (
+        SELECT 1
+        FROM promotion_runs
+        WHERE segment_scope_json IS NOT NULL
+           OR segment_scope_fingerprint IS NOT NULL
+    )
+    AND EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'promotion_runs'::regclass
+          AND conname = 'uq_promotion_runs_loop'
+    )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'promotion_runs'::regclass
+          AND conname = 'uq_promotion_runs_segment_scope'
+    )
+)::int;
+" '1'
+
+log 'applying the test-only legacy fallback repair twice'
+for _ in 1 2; do
+    psql_file \
+        "${LEGACY_DB}" \
+        "${ROOT_DIR}/postgres/tests/repair_legacy_fixture_fallbacks.sql"
+done
+
 for _ in 1 2; do
     psql_file \
         "${LEGACY_DB}" \
@@ -283,6 +329,29 @@ if [[ "${dummy_row_count}" -eq 0 ]]; then
     exit 1
 fi
 
+fallback_experiment_count="$(psql_query "${FRESH_DB}" "
+SELECT count(*)
+FROM ad_experiments
+WHERE segment_id = 'seg_existing_all';
+")"
+if [[ "${fallback_experiment_count}" -lt 4 \
+      || "${fallback_experiment_count}" -ne "${dummy_row_count}" ]]; then
+    printf 'fallback experiment count mismatch: runs=%s fallbacks=%s\n' \
+        "${dummy_row_count}" "${fallback_experiment_count}" >&2
+    exit 1
+fi
+
+active_fallback_assignment_count="$(psql_query "${FRESH_DB}" "
+SELECT count(*)
+FROM active_ad_serving_assignments
+WHERE fallback = true;
+")"
+if [[ "${active_fallback_assignment_count}" -ne 1 ]]; then
+    printf 'active fallback assignment count mismatch: %s\n' \
+        "${active_fallback_assignment_count}" >&2
+    exit 1
+fi
+
 log 'final promotion_runs contract state'
 psql_query "${LEGACY_DB}" "
 SELECT
@@ -305,4 +374,4 @@ WHERE conrelid = 'promotion_runs'::regclass
 ORDER BY 1;
 "
 
-log "all checks passed (${dummy_row_count} dummy promotion_runs verified)"
+log "all checks passed (${dummy_row_count} dummy promotion_runs, ${fallback_experiment_count} fallback experiments, ${active_fallback_assignment_count} active fallback assignments verified)"

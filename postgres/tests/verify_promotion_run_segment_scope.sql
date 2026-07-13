@@ -6,6 +6,14 @@ DO $$
 DECLARE
     invalid_run_count BIGINT;
     scope_mismatch_count BIGINT;
+    fallback_mismatch_count BIGINT;
+    target_count_mismatch_count BIGINT;
+    dummy_run_count BIGINT;
+    dummy_fallback_count BIGINT;
+    sms_target_count BIGINT;
+    sms_fallback_count BIGINT;
+    fallback_assignment_fixture_count BIGINT;
+    active_fallback_assignment_count BIGINT;
     broken_lineage_count BIGINT;
 BEGIN
     IF to_regprocedure(
@@ -104,6 +112,115 @@ BEGIN
         RAISE EXCEPTION
             '% fixture scopes differ from non-fallback experiments',
             scope_mismatch_count;
+    END IF;
+
+    SELECT count(*)
+    INTO target_count_mismatch_count
+    FROM promotion_runs AS pr
+    WHERE jsonb_array_length(pr.segment_scope_json) <> (
+        SELECT count(*)
+        FROM ad_experiments AS ae
+        WHERE ae.promotion_run_id = pr.promotion_run_id
+          AND ae.segment_id <> 'seg_existing_all'
+    );
+
+    IF target_count_mismatch_count <> 0 THEN
+        RAISE EXCEPTION
+            '% fixture target counts differ from scope lengths',
+            target_count_mismatch_count;
+    END IF;
+
+    SELECT count(*)
+    INTO fallback_mismatch_count
+    FROM promotion_runs AS pr
+    WHERE (
+        SELECT count(*)
+        FROM ad_experiments AS ae
+        WHERE ae.promotion_run_id = pr.promotion_run_id
+          AND ae.segment_id = 'seg_existing_all'
+    ) <> 1
+       OR pr.segment_scope_json ? 'seg_existing_all';
+
+    IF fallback_mismatch_count <> 0 THEN
+        RAISE EXCEPTION
+            '% fixture runs violate fallback experiment integrity',
+            fallback_mismatch_count;
+    END IF;
+
+    SELECT count(*)
+    INTO dummy_run_count
+    FROM promotion_runs
+    WHERE promotion_run_id IN (
+        'run_email_a1',
+        'run_onsite_a1',
+        'run_onsite_a2',
+        'run_sms_a1'
+    );
+
+    SELECT count(*)
+    INTO dummy_fallback_count
+    FROM ad_experiments
+    WHERE promotion_run_id IN (
+        'run_email_a1',
+        'run_onsite_a1',
+        'run_onsite_a2',
+        'run_sms_a1'
+    )
+      AND segment_id = 'seg_existing_all';
+
+    IF dummy_run_count <> 4 OR dummy_fallback_count <> 4 THEN
+        RAISE EXCEPTION
+            'dummy fallback integrity mismatch: runs=%, fallbacks=%',
+            dummy_run_count,
+            dummy_fallback_count;
+    END IF;
+
+    SELECT
+        count(*) FILTER (WHERE segment_id <> 'seg_existing_all'),
+        count(*) FILTER (WHERE segment_id = 'seg_existing_all')
+    INTO sms_target_count, sms_fallback_count
+    FROM ad_experiments
+    WHERE promotion_run_id = 'run_sms_a1';
+
+    IF sms_target_count <> 2 OR sms_fallback_count <> 1 THEN
+        RAISE EXCEPTION
+            'run_sms_a1 must have two targets and one fallback';
+    END IF;
+
+    SELECT count(*)
+    INTO fallback_assignment_fixture_count
+    FROM user_segment_assignments
+    WHERE promotion_run_id = 'run_onsite_a2'
+      AND user_id = 'demo_user_onsite_fallback'
+      AND segment_id = 'seg_existing_all'
+      AND ad_experiment_id = 'exp_onsite_a2_fallback'
+      AND content_id = 'content_onsite_a2_near'
+      AND content_option_id = 'onsite_a2_option_1'
+      AND fallback = true
+      AND expires_at > now();
+
+    IF fallback_assignment_fixture_count > 1 THEN
+        RAISE EXCEPTION
+            'fallback serving fixture is duplicated';
+    END IF;
+
+    IF fallback_assignment_fixture_count = 1 THEN
+        SELECT count(*)
+        INTO active_fallback_assignment_count
+        FROM active_ad_serving_assignments
+        WHERE promotion_run_id = 'run_onsite_a2'
+          AND user_id = 'demo_user_onsite_fallback'
+          AND segment_id = 'seg_existing_all'
+          AND ad_experiment_id = 'exp_onsite_a2_fallback'
+          AND content_id = 'content_onsite_a2_near'
+          AND content_option_id = 'onsite_a2_option_1'
+          AND fallback = true
+          AND expires_at > now();
+
+        IF active_fallback_assignment_count <> 1 THEN
+            RAISE EXCEPTION
+                'active fallback serving fixture was not exposed by the view';
+        END IF;
     END IF;
 
     SELECT count(*)
@@ -330,6 +447,25 @@ VALUES
     'booking_conversion_rate',
     0.04,
     'all_segments'
+),
+(
+    'test_scope_exp_b_fallback',
+    'demo_project',
+    'camp_expedia_hotel_demo',
+    'promo_expedia_sms_near_checkin',
+    'test_scope_run_b',
+    'analysis_sms_a1',
+    'generation_sms_a1',
+    'seg_existing_all',
+    'All existing hotel users',
+    'test_content_scope_fallback',
+    'test_scope_fallback_option',
+    'sms',
+    9,
+    'planned',
+    'booking_conversion_rate',
+    0.04,
+    'all_segments'
 );
 
 DO $$
@@ -389,6 +525,33 @@ BEGIN
             'test run scope includes fallback or misses a non-fallback experiment';
     END IF;
 
+    SELECT count(*)
+    INTO scope_mismatch_count
+    FROM promotion_runs AS pr
+    WHERE pr.promotion_run_id IN (
+        'test_scope_run_a',
+        'test_scope_run_b'
+    )
+      AND (
+          jsonb_array_length(pr.segment_scope_json) <> (
+              SELECT count(*)
+              FROM ad_experiments AS ae
+              WHERE ae.promotion_run_id = pr.promotion_run_id
+                AND ae.segment_id <> 'seg_existing_all'
+          )
+          OR (
+              SELECT count(*)
+              FROM ad_experiments AS ae
+              WHERE ae.promotion_run_id = pr.promotion_run_id
+                AND ae.segment_id = 'seg_existing_all'
+          ) <> 1
+      );
+
+    IF scope_mismatch_count <> 0 THEN
+        RAISE EXCEPTION
+            'test runs must each have matching target counts and one fallback';
+    END IF;
+
     BEGIN
         INSERT INTO promotion_runs (
             promotion_run_id,
@@ -415,6 +578,50 @@ BEGIN
             '368e152e586ec2cf917821779f3fbd33976c8dbc855eeb25aa6d245a5c255001'
         );
         RAISE EXCEPTION 'identical full composite scope was accepted';
+    EXCEPTION
+        WHEN unique_violation THEN NULL;
+    END;
+
+    BEGIN
+        INSERT INTO ad_experiments (
+            ad_experiment_id,
+            project_id,
+            campaign_id,
+            promotion_id,
+            promotion_run_id,
+            analysis_id,
+            generation_id,
+            segment_id,
+            segment_name,
+            content_id,
+            content_option_id,
+            channel,
+            loop_count,
+            status,
+            goal_metric,
+            goal_target_value,
+            goal_basis
+        )
+        VALUES (
+            'test_scope_exp_a_fallback_duplicate',
+            'demo_project',
+            'camp_expedia_hotel_demo',
+            'promo_expedia_sms_near_checkin',
+            'test_scope_run_a',
+            'analysis_sms_a1',
+            'generation_sms_a1',
+            'seg_existing_all',
+            'All existing hotel users',
+            'test_content_scope_fallback',
+            'test_scope_fallback_option',
+            'sms',
+            9,
+            'planned',
+            'booking_conversion_rate',
+            0.04,
+            'all_segments'
+        );
+        RAISE EXCEPTION 'second fallback experiment was accepted';
     EXCEPTION
         WHEN unique_violation THEN NULL;
     END;
