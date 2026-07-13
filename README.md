@@ -274,6 +274,13 @@ Fresh schema/dummy 재실행, main 기준 3단계 migration 재실행, 실패 ro
 BASE_REF=origin/main ./scripts/verify_postgres_contract.sh
 ```
 
+Scope migration이 main에 병합된 뒤에는 `origin/main` 자체가 이미 최종 scope
+schema를 포함합니다. 검증 스크립트는 이 경우 first-parent history를 따라가
+`segment_scope_json` 도입 전의 가장 가까운 schema를 legacy 기준으로 자동
+선택합니다. 선택한 commit은 로그에 출력되며, pre-scope schema를 찾을 수
+없으면 검증을 중단합니다. GitHub Actions는 이 history를 사용할 수 있도록
+`fetch-depth: 0` checkout을 유지해야 합니다.
+
 ## Docker Compose
 
 로컬 DB를 올릴 때는 Compose에 local env 파일을 넘깁니다.
