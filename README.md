@@ -84,26 +84,27 @@ ClickHouse는 `raw_events`를 원천으로 두고 `promotion_touch_events`, `boo
 
 ## Promotion run segment scope 전환
 
-Decision의 `LOOPAD_PARTIAL_PROMOTION_RUN_SCOPE_ENABLED` 기본값은 `false`입니다. OFF 상태에서는 다음 계약을 유지합니다.
+Decision은 `segment_ids`를 포함한 신규 run과 failed-only 자동 next-loop를 항상
+처리합니다. 이 Decision 버전을 배포하기 전에 기존 DB의 segment scope
+expand, backfill, finalize와 Dashboard의 scope 응답 파싱이 완료되어야 합니다.
 
-- `segment_ids`를 포함한 신규 run은 lifecycle write 전에 409를 반환합니다.
-- failed-only 자동 next-loop는 write 전에 409를 반환합니다.
-- manual preparation 생성과 활성화는 write 전에 409를 반환합니다.
-- `segment_ids`를 생략한 run 요청만 전체 generation scope로 처리합니다.
-
-Finalize 전에 flag를 ON으로 바꾸면 기존 `uq_promotion_runs_loop` 때문에 같은 promotion/loop의 다른 scope가 충돌할 수 있습니다. ECS task별 image/revision 또는 flag가 다르면 같은 요청이 task에 따라 200과 409를 오갈 수 있습니다. 기존 run의 scope, target experiment, fallback experiment 중 하나라도 손상됐으면 Decision의 기존 run 재사용 무결성 검사에서 409를 반환합니다. 이 응답은 데이터 무결성 오류이며 JSON 직렬화 문제로 오인하면 안 됩니다.
+Finalize 전에 새 Decision 버전을 배포하면 기존 `uq_promotion_runs_loop` 때문에
+같은 promotion/loop의 다른 scope가 충돌할 수 있습니다. ECS task별
+image/revision이 다르면 요청 결과가 task에 따라 달라질 수 있습니다. 기존 run의
+scope, target experiment, fallback experiment 중 하나라도 손상됐으면 Decision의
+기존 run 재사용 무결성 검사에서 409를 반환합니다. 이 응답은 데이터 무결성
+오류이며 JSON 직렬화 문제로 오인하면 안 됩니다.
 
 기존 DB에는 다음 순서를 유지합니다.
 
 1. `expand_promotion_run_segment_scope.sql`
-2. Decision dual-write 배포 후 모든 task에서 flag OFF 유지
-3. 아래 preflight 확인 후 기존 run backfill과 target/fallback 무결성 검증
-4. `finalize_promotion_run_segment_scope.sql`로 composite unique 적용
-5. Dashboard의 `segment_ids`와 `is_fallback` 파싱 반영
-6. 모든 dev task를 같은 image/revision과 flag ON으로 교체
-7. dev smoke test
-8. Dashboard/Advertisement 연동과 dispatch 재시도 확인
-9. 운영 전체 task에서 flag 일괄 ON
+2. 아래 preflight 확인 후 기존 run backfill과 target/fallback 무결성 검증
+3. `finalize_promotion_run_segment_scope.sql`로 composite unique 적용
+4. Dashboard의 `segment_ids`와 `is_fallback` 파싱 반영
+5. 모든 dev task를 같은 Decision image/revision으로 교체
+6. dev smoke test
+7. Dashboard/Advertisement 연동과 dispatch 재시도 확인
+8. 운영 전체 task를 같은 검증 완료 revision으로 교체
 
 이 migration은 단계적이지만 무중단을 보장하지 않습니다. Backfill은 `promotion_runs`에 `SHARE ROW EXCLUSIVE`, `ad_experiments`에 `SHARE` lock을 잡고 전체 대상 row를 갱신합니다. Finalize의 `SET NOT NULL`, CHECK, UNIQUE 변경도 쓰기를 차단할 수 있는 강한 lock을 사용합니다. 테이블 크기와 현재 transaction을 확인하고, 데이터 규모가 크거나 쓰기 트래픽이 지속되면 maintenance window를 확보합니다.
 
