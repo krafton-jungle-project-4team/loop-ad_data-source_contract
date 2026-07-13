@@ -1384,7 +1384,51 @@ ON next_loop_preparations (activated_promotion_run_id)
 WHERE activated_promotion_run_id IS NOT NULL;
 
 -- =========================================================
--- 17. User Segment Assignments
+-- 17. Segment Assignment Execution Provenance
+-- Records the matcher/input contract used by one assignment execution.
+-- =========================================================
+CREATE TABLE IF NOT EXISTS segment_assignment_executions (
+    segment_assignment_execution_id VARCHAR(100) PRIMARY KEY,
+    promotion_run_id VARCHAR(100) NOT NULL,
+    request_fingerprint VARCHAR(64) NOT NULL,
+    input_fingerprint VARCHAR(64) NOT NULL,
+    matcher_strategy VARCHAR(100) NOT NULL,
+    matcher_version VARCHAR(100) NOT NULL,
+    vector_version VARCHAR(50) NOT NULL,
+    source_cutoff_at TIMESTAMPTZ NOT NULL,
+    input_manifest_json JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT fk_segment_assignment_executions_run
+        FOREIGN KEY (promotion_run_id)
+        REFERENCES promotion_runs (promotion_run_id)
+        ON UPDATE NO ACTION
+        ON DELETE NO ACTION,
+
+    CONSTRAINT chk_segment_assignment_executions_identifiers
+        CHECK (
+            btrim(segment_assignment_execution_id) <> ''
+            AND btrim(promotion_run_id) <> ''
+            AND btrim(matcher_strategy) <> ''
+            AND btrim(matcher_version) <> ''
+            AND btrim(vector_version) <> ''
+        ),
+
+    CONSTRAINT chk_segment_assignment_executions_fingerprints
+        CHECK (
+            request_fingerprint ~ '^[0-9a-f]{64}$'
+            AND input_fingerprint ~ '^[0-9a-f]{64}$'
+        ),
+
+    CONSTRAINT chk_segment_assignment_executions_input_manifest
+        CHECK (jsonb_typeof(input_manifest_json) = 'object'),
+
+    CONSTRAINT uq_segment_assignment_executions_run_request
+        UNIQUE (promotion_run_id, request_fingerprint)
+);
+
+-- =========================================================
+-- 18. User Segment Assignments
 -- Decision builds these in batch. Dashboard ad serving reads these.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS user_segment_assignments (
@@ -1404,12 +1448,21 @@ CREATE TABLE IF NOT EXISTS user_segment_assignments (
     assignment_source VARCHAR(50) NOT NULL DEFAULT 'decision_batch',
     assigned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at TIMESTAMPTZ,
+    segment_assignment_execution_id VARCHAR(100),
 
     CONSTRAINT fk_user_segment_assignments_project
         FOREIGN KEY (project_id) REFERENCES projects (project_id),
 
     CONSTRAINT fk_user_segment_assignments_run
         FOREIGN KEY (promotion_run_id) REFERENCES promotion_runs (promotion_run_id),
+
+    CONSTRAINT fk_user_segment_assignments_execution
+        FOREIGN KEY (segment_assignment_execution_id)
+        REFERENCES segment_assignment_executions (
+            segment_assignment_execution_id
+        )
+        ON UPDATE NO ACTION
+        ON DELETE NO ACTION,
 
     CONSTRAINT fk_user_segment_assignments_segment
         FOREIGN KEY (segment_id) REFERENCES segment_definitions (segment_id),
@@ -1451,6 +1504,9 @@ ON user_segment_assignments (project_id);
 CREATE INDEX IF NOT EXISTS idx_user_segment_assignments_run_id
 ON user_segment_assignments (promotion_run_id);
 
+CREATE INDEX IF NOT EXISTS idx_user_segment_assignments_execution_id
+ON user_segment_assignments (segment_assignment_execution_id);
+
 CREATE INDEX IF NOT EXISTS idx_user_segment_assignments_user_id
 ON user_segment_assignments (user_id);
 
@@ -1461,7 +1517,7 @@ CREATE INDEX IF NOT EXISTS idx_user_segment_assignments_ad_experiment_id
 ON user_segment_assignments (ad_experiment_id);
 
 -- =========================================================
--- 18. Ad Dispatch Jobs
+-- 19. Ad Dispatch Jobs
 -- Dashboard-owned email/sms dispatch state.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS ad_dispatch_jobs (
@@ -1520,7 +1576,7 @@ CREATE INDEX IF NOT EXISTS idx_ad_dispatch_jobs_status
 ON ad_dispatch_jobs (status);
 
 -- =========================================================
--- 19. Redirect Links
+-- 20. Redirect Links
 -- Dashboard-owned redirect tracking for email/sms.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS redirect_links (
@@ -1575,7 +1631,7 @@ CREATE INDEX IF NOT EXISTS idx_redirect_links_user_id
 ON redirect_links (user_id);
 
 -- =========================================================
--- 20. Event Validation Errors
+-- 21. Event Validation Errors
 -- Collector/Dashboard can show bad event payloads.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS event_validation_errors (
@@ -1602,7 +1658,7 @@ CREATE INDEX IF NOT EXISTS idx_event_validation_errors_created_at
 ON event_validation_errors (created_at);
 
 -- =========================================================
--- 21. Active Ad Serving Assignments View
+-- 22. Active Ad Serving Assignments View
 -- Dashboard ad hot path uses DB/view; it must not call Decision API per request.
 -- =========================================================
 CREATE OR REPLACE VIEW active_ad_serving_assignments AS
