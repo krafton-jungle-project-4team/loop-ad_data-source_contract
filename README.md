@@ -21,6 +21,7 @@ LoopAd의 로컬 데이터 소스 계약을 공유하는 최소 repo입니다.
 │   ├── backfill_promotion_run_segment_scope.sql
 │   ├── finalize_promotion_run_segment_scope.sql
 │   ├── tests/
+│   │   ├── repair_legacy_fixture_fallbacks.sql
 │   │   └── verify_promotion_run_segment_scope.sql
 │   └── schema.sql
 ├── scripts/
@@ -83,18 +84,30 @@ ClickHouse는 `raw_events`를 원천으로 두고 `promotion_touch_events`, `boo
 
 ## Promotion run segment scope 전환
 
+Decision의 `LOOPAD_PARTIAL_PROMOTION_RUN_SCOPE_ENABLED` 기본값은 `false`입니다. OFF 상태에서는 다음 계약을 유지합니다.
+
+- `segment_ids`를 포함한 신규 run은 lifecycle write 전에 409를 반환합니다.
+- failed-only 자동 next-loop는 write 전에 409를 반환합니다.
+- manual preparation 생성과 활성화는 write 전에 409를 반환합니다.
+- `segment_ids`를 생략한 run 요청만 전체 generation scope로 처리합니다.
+
+Finalize 전에 flag를 ON으로 바꾸면 기존 `uq_promotion_runs_loop` 때문에 같은 promotion/loop의 다른 scope가 충돌할 수 있습니다. ECS task별 image/revision 또는 flag가 다르면 같은 요청이 task에 따라 200과 409를 오갈 수 있습니다. 기존 run의 scope, target experiment, fallback experiment 중 하나라도 손상됐으면 Decision의 기존 run 재사용 무결성 검사에서 409를 반환합니다. 이 응답은 데이터 무결성 오류이며 JSON 직렬화 문제로 오인하면 안 됩니다.
+
 기존 DB에는 다음 순서를 유지합니다.
 
 1. `expand_promotion_run_segment_scope.sql`
-2. Decision dual-write 배포 (`LOOPAD_PARTIAL_PROMOTION_RUN_SCOPE_ENABLED`는 OFF)
-3. 아래 preflight 확인 후 `backfill_promotion_run_segment_scope.sql`
-4. 아래 preflight 확인 후 `finalize_promotion_run_segment_scope.sql`
-5. Dashboard exact scope/lineage reader 배포
-6. `LOOPAD_PARTIAL_PROMOTION_RUN_SCOPE_ENABLED`를 ON
+2. Decision dual-write 배포 후 모든 task에서 flag OFF 유지
+3. 아래 preflight 확인 후 기존 run backfill과 target/fallback 무결성 검증
+4. `finalize_promotion_run_segment_scope.sql`로 composite unique 적용
+5. Dashboard의 `segment_ids`와 `is_fallback` 파싱 반영
+6. 모든 dev task를 같은 image/revision과 flag ON으로 교체
+7. dev smoke test
+8. Dashboard/Advertisement 연동과 dispatch 재시도 확인
+9. 운영 전체 task에서 flag 일괄 ON
 
 이 migration은 단계적이지만 무중단을 보장하지 않습니다. Backfill은 `promotion_runs`에 `SHARE ROW EXCLUSIVE`, `ad_experiments`에 `SHARE` lock을 잡고 전체 대상 row를 갱신합니다. Finalize의 `SET NOT NULL`, CHECK, UNIQUE 변경도 쓰기를 차단할 수 있는 강한 lock을 사용합니다. 테이블 크기와 현재 transaction을 확인하고, 데이터 규모가 크거나 쓰기 트래픽이 지속되면 maintenance window를 확보합니다.
 
-Backfill 전에 크기, 장기 transaction, scope 원천 누락, 계산 후 중복을 확인합니다.
+Backfill 전에 크기, 장기 transaction, scope 원천 누락, fallback 누락, 계산 후 중복을 확인합니다.
 
 ```sql
 SELECT
@@ -120,6 +133,15 @@ WHERE NOT EXISTS (
     WHERE ae.promotion_run_id = pr.promotion_run_id
       AND ae.segment_id <> 'seg_existing_all'
 );
+
+SELECT pr.promotion_run_id
+FROM promotion_runs AS pr
+WHERE (
+    SELECT count(*)
+    FROM ad_experiments AS ae
+    WHERE ae.promotion_run_id = pr.promotion_run_id
+      AND ae.segment_id = 'seg_existing_all'
+) <> 1;
 
 WITH distinct_segments AS (
     SELECT DISTINCT promotion_run_id, segment_id
@@ -174,7 +196,7 @@ GROUP BY
 HAVING count(*) > 1;
 ```
 
-Finalize 전에는 두 쿼리가 모두 0건이어야 합니다.
+Finalize 전에는 아래 쿼리가 모두 0건이어야 합니다.
 
 ```sql
 SELECT promotion_run_id
@@ -203,11 +225,48 @@ GROUP BY
     segment_scope_fingerprint,
     loop_count
 HAVING count(*) > 1;
+
+SELECT pr.promotion_run_id
+FROM promotion_runs AS pr
+WHERE jsonb_array_length(pr.segment_scope_json) <> (
+        SELECT count(*)
+        FROM ad_experiments AS ae
+        WHERE ae.promotion_run_id = pr.promotion_run_id
+          AND ae.segment_id <> 'seg_existing_all'
+    )
+   OR (
+        SELECT count(*)
+        FROM ad_experiments AS ae
+        WHERE ae.promotion_run_id = pr.promotion_run_id
+          AND ae.segment_id = 'seg_existing_all'
+   ) <> 1
+   OR EXISTS (
+        SELECT scope_segment.segment_id
+        FROM jsonb_array_elements_text(
+            pr.segment_scope_json
+        ) AS scope_segment(segment_id)
+        EXCEPT
+        SELECT ae.segment_id
+        FROM ad_experiments AS ae
+        WHERE ae.promotion_run_id = pr.promotion_run_id
+          AND ae.segment_id <> 'seg_existing_all'
+   )
+   OR EXISTS (
+        SELECT ae.segment_id
+        FROM ad_experiments AS ae
+        WHERE ae.promotion_run_id = pr.promotion_run_id
+          AND ae.segment_id <> 'seg_existing_all'
+        EXCEPT
+        SELECT scope_segment.segment_id
+        FROM jsonb_array_elements_text(
+            pr.segment_scope_json
+        ) AS scope_segment(segment_id)
+   );
 ```
 
 세 migration 파일은 각각 하나의 transaction이며 재실행할 수 있습니다. 파일 실행이 실패하면 해당 transaction을 `ROLLBACK`하고 원인 row 또는 lock 경합을 해소한 뒤 같은 단계를 다시 실행합니다. `psql -v ON_ERROR_STOP=1 -f ...`처럼 실패 시 연결을 종료하는 실행 방식은 미완료 transaction을 자동 rollback합니다. 이전 단계가 성공했더라도 적용 순서를 건너뛰지 않습니다.
 
-Dashboard rollout blocker는 별도로 해소해야 합니다. `promotion_id + loop_count + LIMIT 1`로 run을 고르면 동일 loop의 다른 scope를 잘못 연결할 수 있으므로 금지합니다. 단건 run은 `promotion_run_id`로 조회하고, next-loop 연결은 `parent_ad_experiment_id` 또는 preparation/activation lineage로 추적합니다. Dashboard exact lineage reader가 배포되기 전에는 `LOOPAD_PARTIAL_PROMOTION_RUN_SCOPE_ENABLED`를 켜면 안 됩니다.
+Dashboard rollout blocker는 별도로 해소해야 합니다. `promotion_id + loop_count + LIMIT 1`로 run을 고르면 동일 loop의 다른 scope를 잘못 연결할 수 있으므로 금지합니다. 단건 run은 `promotion_run_id`로 조회하고, next-loop 연결은 `parent_ad_experiment_id` 또는 preparation/activation lineage로 추적합니다. Dashboard가 `segment_ids`와 `is_fallback`을 파싱하고 모든 dev task가 동일 revision으로 교체되기 전에는 flag를 켜면 안 됩니다.
 
 Fresh schema/dummy 재실행, main 기준 3단계 migration 재실행, 실패 rollback, multi-scope, malformed scope, fixture lineage를 격리된 임시 PostgreSQL에서 검증하려면 다음 명령을 사용합니다. 스크립트는 실행이 끝나면 임시 container를 삭제하며 공유 DB에 접속하지 않습니다.
 
