@@ -12,49 +12,13 @@ BEGIN
         FROM promotion_runs
         WHERE segment_scope_json IS NULL
            OR segment_scope_fingerprint IS NULL
-           OR jsonb_typeof(segment_scope_json) <> 'array'
-           OR jsonb_array_length(segment_scope_json) = 0
-           OR segment_scope_fingerprint !~ '^[0-9a-f]{64}$'
+           OR NOT is_valid_promotion_run_segment_scope(
+                segment_scope_json,
+                segment_scope_fingerprint
+           )
     ) THEN
         RAISE EXCEPTION
             'scope finalize failed: run backfill and validation first';
-    END IF;
-
-    IF EXISTS (
-        SELECT 1
-        FROM promotion_runs AS pr
-        WHERE pr.segment_scope_json <> (
-            SELECT jsonb_agg(segment_id ORDER BY segment_id COLLATE "C")
-            FROM (
-                SELECT DISTINCT scope_value.segment_id
-                FROM jsonb_array_elements_text(
-                    pr.segment_scope_json
-                ) AS scope_value(segment_id)
-                WHERE btrim(scope_value.segment_id) <> ''
-                  AND scope_value.segment_id = btrim(scope_value.segment_id)
-            ) AS normalized
-        )
-           OR pr.segment_scope_fingerprint <> (
-            SELECT encode(
-                digest(
-                    convert_to(
-                        '[' || string_agg(
-                            to_json(scope_value.segment_id)::text,
-                            ',' ORDER BY scope_value.ordinality
-                        ) || ']',
-                        'UTF8'
-                    ),
-                    'sha256'
-                ),
-                'hex'
-            )
-            FROM jsonb_array_elements_text(
-                pr.segment_scope_json
-            ) WITH ORDINALITY AS scope_value(segment_id, ordinality)
-        )
-    ) THEN
-        RAISE EXCEPTION
-            'scope finalize failed: scope or fingerprint is not canonical';
     END IF;
 
     IF EXISTS (
@@ -79,31 +43,24 @@ ALTER TABLE promotion_runs
     ALTER COLUMN segment_scope_json SET NOT NULL,
     ALTER COLUMN segment_scope_fingerprint SET NOT NULL;
 
+ALTER TABLE promotion_runs
+    DROP CONSTRAINT IF EXISTS chk_promotion_runs_segment_scope_json,
+    DROP CONSTRAINT IF EXISTS chk_promotion_runs_segment_scope_fingerprint;
+
 DO $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1
         FROM pg_constraint
         WHERE conrelid = 'promotion_runs'::regclass
-          AND conname = 'chk_promotion_runs_segment_scope_json'
+          AND conname = 'chk_promotion_runs_segment_scope'
     ) THEN
         ALTER TABLE promotion_runs
-            ADD CONSTRAINT chk_promotion_runs_segment_scope_json
-            CHECK (
-                jsonb_typeof(segment_scope_json) = 'array'
-                AND jsonb_array_length(segment_scope_json) >= 1
-            );
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_constraint
-        WHERE conrelid = 'promotion_runs'::regclass
-          AND conname = 'chk_promotion_runs_segment_scope_fingerprint'
-    ) THEN
-        ALTER TABLE promotion_runs
-            ADD CONSTRAINT chk_promotion_runs_segment_scope_fingerprint
-            CHECK (segment_scope_fingerprint ~ '^[0-9a-f]{64}$');
+            ADD CONSTRAINT chk_promotion_runs_segment_scope
+            CHECK (is_valid_promotion_run_segment_scope(
+                segment_scope_json,
+                segment_scope_fingerprint
+            ));
     END IF;
 
     IF NOT EXISTS (

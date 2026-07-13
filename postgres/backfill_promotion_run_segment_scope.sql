@@ -47,68 +47,13 @@ BEGIN
     IF EXISTS (
         SELECT 1
         FROM promotion_runs
-        WHERE jsonb_typeof(segment_scope_json) <> 'array'
-           OR jsonb_array_length(segment_scope_json) = 0
-           OR segment_scope_fingerprint !~ '^[0-9a-f]{64}$'
-    ) THEN
-        RAISE EXCEPTION
-            'scope backfill failed: scope columns have invalid shapes';
-    END IF;
-
-    IF EXISTS (
-        SELECT 1
-        FROM promotion_runs AS pr
-        CROSS JOIN LATERAL jsonb_array_elements_text(
-            pr.segment_scope_json
-        ) AS scope_value(segment_id)
-        WHERE btrim(scope_value.segment_id) = ''
-           OR scope_value.segment_id <> btrim(scope_value.segment_id)
-    ) THEN
-        RAISE EXCEPTION
-            'scope backfill failed: segment IDs must be nonblank and trimmed';
-    END IF;
-
-    IF EXISTS (
-        SELECT 1
-        FROM promotion_runs AS pr
-        WHERE pr.segment_scope_json <> (
-            SELECT jsonb_agg(segment_id ORDER BY segment_id COLLATE "C")
-            FROM (
-                SELECT DISTINCT scope_value.segment_id
-                FROM jsonb_array_elements_text(
-                    pr.segment_scope_json
-                ) AS scope_value(segment_id)
-            ) AS normalized
+        WHERE NOT is_valid_promotion_run_segment_scope(
+            segment_scope_json,
+            segment_scope_fingerprint
         )
     ) THEN
         RAISE EXCEPTION
-            'scope backfill failed: scope arrays must be sorted and unique';
-    END IF;
-
-    IF EXISTS (
-        SELECT 1
-        FROM promotion_runs AS pr
-        WHERE pr.segment_scope_fingerprint <> (
-            SELECT encode(
-                digest(
-                    convert_to(
-                        '[' || string_agg(
-                            to_json(scope_value.segment_id)::text,
-                            ',' ORDER BY scope_value.ordinality
-                        ) || ']',
-                        'UTF8'
-                    ),
-                    'sha256'
-                ),
-                'hex'
-            )
-            FROM jsonb_array_elements_text(
-                pr.segment_scope_json
-            ) WITH ORDINALITY AS scope_value(segment_id, ordinality)
-        )
-    ) THEN
-        RAISE EXCEPTION
-            'scope backfill failed: fingerprint is not canonical array SHA-256';
+            'scope backfill failed: scope or fingerprint is not canonical';
     END IF;
 
     IF EXISTS (
