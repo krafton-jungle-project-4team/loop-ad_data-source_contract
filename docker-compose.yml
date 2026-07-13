@@ -2,7 +2,7 @@ name: loop-ad_data-source_contract
 
 services:
   postgres:
-    image: postgres:16.13-alpine
+    image: pgvector/pgvector:pg16
     ports:
       - "${POSTGRES_PORT:?POSTGRES_PORT is required}:5432"
     environment:

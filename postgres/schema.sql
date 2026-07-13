@@ -1,5 +1,5 @@
 -- =========================================================
--- Loop-Ad PostgreSQL Schema Contract v1.6
+-- Loop-Ad PostgreSQL Schema Contract v1.7
 -- Draft: promotion segment suggestion / confirmation flow
 -- Owner: loop-ad_data-source_contract
 -- Domain: hotel / accommodation booking
@@ -293,7 +293,7 @@ ON segment_query_previews (sample_size_status);
 -- =========================================================
 CREATE TABLE IF NOT EXISTS segment_definitions (
     segment_id VARCHAR(100) PRIMARY KEY,
-    project_id VARCHAR(100) NOT NULL,
+    project_id VARCHAR(100),
     campaign_id VARCHAR(100),
     promotion_id VARCHAR(100),
 
@@ -345,8 +345,78 @@ CREATE TABLE IF NOT EXISTS segment_definitions (
         CHECK (
             promotion_id IS NULL
             OR campaign_id IS NOT NULL
+        ),
+
+    CONSTRAINT chk_segment_definitions_project_scope
+        CHECK (
+            (
+                segment_id = 'seg_existing_all'
+                AND project_id IS NULL
+                AND campaign_id IS NULL
+                AND promotion_id IS NULL
+                AND query_preview_id IS NULL
+                AND source = 'system_default'
+            )
+            OR (
+                segment_id <> 'seg_existing_all'
+                AND project_id IS NOT NULL
+            )
         )
 );
+
+-- The fallback segment is a global system identity shared by every project.
+-- Keep ordinary segments project-scoped while allowing this one FK target to
+-- survive project deletion and fresh databases without fixture data.
+INSERT INTO segment_definitions (
+    segment_id,
+    project_id,
+    campaign_id,
+    promotion_id,
+    segment_name,
+    source,
+    query_preview_id,
+    natural_language_query,
+    generated_sql,
+    rule_json,
+    profile_json,
+    sample_size,
+    total_eligible_user_count,
+    sample_ratio,
+    status
+)
+VALUES (
+    'seg_existing_all',
+    NULL,
+    NULL,
+    NULL,
+    'All existing users',
+    'system_default',
+    NULL,
+    NULL,
+    NULL,
+    '{"type": "all_existing_users"}'::jsonb,
+    '{"description": "Global fallback for all existing users."}'::jsonb,
+    0,
+    0,
+    0,
+    'active'
+)
+ON CONFLICT (segment_id) DO UPDATE SET
+    project_id = NULL,
+    campaign_id = NULL,
+    promotion_id = NULL,
+    segment_name = EXCLUDED.segment_name,
+    source = EXCLUDED.source,
+    query_preview_id = NULL,
+    natural_language_query = NULL,
+    generated_sql = NULL,
+    rule_json = EXCLUDED.rule_json,
+    profile_json = EXCLUDED.profile_json,
+    sample_size = EXCLUDED.sample_size,
+    total_eligible_user_count = EXCLUDED.total_eligible_user_count,
+    sample_ratio = EXCLUDED.sample_ratio,
+    status = EXCLUDED.status,
+    updated_at = now();
 
 CREATE INDEX IF NOT EXISTS idx_segment_definitions_project_id
 ON segment_definitions (project_id);

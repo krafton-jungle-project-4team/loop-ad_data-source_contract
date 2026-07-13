@@ -74,6 +74,8 @@ docker compose \
 
 PostgreSQL은 `Campaign -> Promotion -> Segment -> Ad Experiment` 실행 상태를 저장하며, ANN segment matching을 위해 `pgvector` extension을 사용합니다. 핵심 테이블은 `campaigns`, `promotions`, `promotion_analyses`, `promotion_target_segments`, `generation_runs`, `content_candidates`, `promotion_runs`, `ad_experiments`, `promotion_evaluations`, `next_loop_preparations`, `user_segment_assignments`, `segment_query_previews`, `segment_definitions`입니다.
 
+Fallback 식별자인 `seg_existing_all`은 특정 프로젝트에 속하지 않는 전역 `system_default` 세그먼트입니다. `postgres/schema.sql`이 fresh DB에서도 이 행을 생성하며, 이 행에 한해서만 `segment_definitions.project_id`가 `NULL`일 수 있습니다. 그 밖의 모든 세그먼트는 기존처럼 프로젝트 ID가 필수입니다. Dashboard와 Decision은 fallback 여부를 계속 `segment_id = 'seg_existing_all'`로 판별합니다.
+
 Manual next-loop 관련 preparation·child lineage·legacy serving provenance 계약은 `postgres/schema.sql`에 정의합니다. 실제 dev/운영 DB 적용은 별도 운영 절차로 수행하며 migration history는 관리하지 않습니다.
 
 Promotion run의 full composite identity는 `project_id + promotion_id + analysis_id + generation_id + segment_scope_fingerprint + loop_count`입니다. `segment_scope_fingerprint`는 fallback `seg_existing_all`을 제외하고 C collation으로 정렬·중복 제거한 segment ID 배열의 compact JSON SHA-256입니다. 따라서 다른 `analysis_id` 또는 `generation_id`는 같은 promotion·loop·scope라도 별도 실행 identity입니다. Dashboard 문서에서 쓰는 `promotion_id + loop_count + segment_scope_fingerprint`는 조회 맥락을 설명하는 축약 표현이며 실제 unique key를 뜻하지 않습니다.
@@ -87,24 +89,26 @@ ClickHouse는 `raw_events`를 원천으로 두고 `promotion_touch_events`, `boo
 Decision은 `segment_ids`를 포함한 신규 run과 failed-only 자동 next-loop를 항상
 처리합니다. 이 Decision 버전을 배포하기 전에 기존 DB의 segment scope
 expand, backfill, finalize와 Dashboard의 scope 응답 파싱이 완료되어야 합니다.
+이 계약을 위한 새 환경변수나 대체 feature flag는 없습니다. 기능 활성화는
+flag 변경이 아니라 검증된 Decision image/revision 배포로 수행합니다.
 
 Finalize 전에 새 Decision 버전을 배포하면 기존 `uq_promotion_runs_loop` 때문에
-같은 promotion/loop의 다른 scope가 충돌할 수 있습니다. ECS task별
-image/revision이 다르면 요청 결과가 task에 따라 달라질 수 있습니다. 기존 run의
-scope, target experiment, fallback experiment 중 하나라도 손상됐으면 Decision의
-기존 run 재사용 무결성 검사에서 409를 반환합니다. 이 응답은 데이터 무결성
-오류이며 JSON 직렬화 문제로 오인하면 안 됩니다.
+같은 promotion/loop의 다른 scope가 충돌할 수 있습니다. 같은 ECS service의
+모든 task는 동일한 Decision image/revision을 사용해야 합니다. 기존 run의 scope,
+fingerprint, target/fallback experiment, lineage 중 하나라도 손상됐으면 Decision의
+기존 run 재사용 무결성 검사에서 409를 반환합니다. 이 응답은 유지해야 하는
+데이터 무결성 검증이며 JSON 직렬화 문제로 오인하면 안 됩니다.
 
 기존 DB에는 다음 순서를 유지합니다.
 
-1. `expand_promotion_run_segment_scope.sql`
-2. 아래 preflight 확인 후 기존 run backfill과 target/fallback 무결성 검증
-3. `finalize_promotion_run_segment_scope.sql`로 composite unique 적용
+1. `expand_promotion_run_segment_scope.sql`로 scope 컬럼을 추가하고 기존 `seg_existing_all`을 전역 fallback으로 정규화
+2. 아래 preflight 확인 후 기존 run backfill과 scope·fingerprint·target/fallback·lineage 무결성 검증
+3. `finalize_promotion_run_segment_scope.sql`로 기존 `uq_promotion_runs_loop`를 제거하고 full composite unique 적용
 4. Dashboard의 `segment_ids`와 `is_fallback` 파싱 반영
-5. 모든 dev task를 같은 Decision image/revision으로 교체
+5. dev ECS service의 모든 task를 같은 검증 완료 Decision image/revision으로 교체
 6. dev smoke test
-7. Dashboard/Advertisement 연동과 dispatch 재시도 확인
-8. 운영 전체 task를 같은 검증 완료 revision으로 교체
+7. Dashboard/Advertisement 계약과 dispatch 재시도 확인
+8. 운영 ECS service의 모든 task를 같은 검증 완료 Decision image/revision으로 교체
 
 이 migration은 단계적이지만 무중단을 보장하지 않습니다. Backfill은 `promotion_runs`에 `SHARE ROW EXCLUSIVE`, `ad_experiments`에 `SHARE` lock을 잡고 전체 대상 row를 갱신합니다. Finalize의 `SET NOT NULL`, CHECK, UNIQUE 변경도 쓰기를 차단할 수 있는 강한 lock을 사용합니다. 테이블 크기와 현재 transaction을 확인하고, 데이터 규모가 크거나 쓰기 트래픽이 지속되면 maintenance window를 확보합니다.
 
@@ -267,7 +271,7 @@ WHERE jsonb_array_length(pr.segment_scope_json) <> (
 
 세 migration 파일은 각각 하나의 transaction이며 재실행할 수 있습니다. 파일 실행이 실패하면 해당 transaction을 `ROLLBACK`하고 원인 row 또는 lock 경합을 해소한 뒤 같은 단계를 다시 실행합니다. `psql -v ON_ERROR_STOP=1 -f ...`처럼 실패 시 연결을 종료하는 실행 방식은 미완료 transaction을 자동 rollback합니다. 이전 단계가 성공했더라도 적용 순서를 건너뛰지 않습니다.
 
-Dashboard rollout blocker는 별도로 해소해야 합니다. `promotion_id + loop_count + LIMIT 1`로 run을 고르면 동일 loop의 다른 scope를 잘못 연결할 수 있으므로 금지합니다. 단건 run은 `promotion_run_id`로 조회하고, next-loop 연결은 `parent_ad_experiment_id` 또는 preparation/activation lineage로 추적합니다. Dashboard가 `segment_ids`와 `is_fallback`을 파싱하고 모든 dev task가 동일 revision으로 교체되기 전에는 flag를 켜면 안 됩니다.
+Dashboard rollout blocker는 별도로 해소해야 합니다. `promotion_id + loop_count + LIMIT 1`로 run을 고르면 동일 loop의 다른 scope를 잘못 연결할 수 있으므로 금지합니다. 단건 run은 `promotion_run_id`로 조회하고, next-loop 연결은 `parent_ad_experiment_id` 또는 preparation/activation lineage로 추적합니다. Dashboard가 `segment_ids`와 `is_fallback`을 파싱하고 같은 dev ECS service의 모든 task가 동일한 검증 완료 Decision image/revision을 사용해야 합니다. 문제가 발생하면 service 전체를 이전 검증 완료 Decision image/revision으로 롤백합니다.
 
 Fresh schema/dummy 재실행, main 기준 3단계 migration 재실행, 실패 rollback, multi-scope, malformed scope, fixture lineage를 격리된 임시 PostgreSQL에서 검증하려면 다음 명령을 사용합니다. 스크립트는 실행이 끝나면 임시 container를 삭제하며 공유 DB에 접속하지 않습니다.
 
