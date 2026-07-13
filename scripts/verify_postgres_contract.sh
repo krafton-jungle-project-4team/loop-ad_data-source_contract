@@ -127,8 +127,47 @@ docker exec "${CONTAINER_NAME}" \
 
 log 'verifying fresh schema and rerunnable dummy data'
 psql_file "${FRESH_DB}" "${ROOT_DIR}/postgres/schema.sql"
+
+assert_query "${FRESH_DB}" "
+SELECT (
+    project_id IS NULL
+    AND campaign_id IS NULL
+    AND promotion_id IS NULL
+    AND query_preview_id IS NULL
+    AND source = 'system_default'
+    AND status = 'active'
+)::int
+FROM segment_definitions
+WHERE segment_id = 'seg_existing_all';
+" '1'
+
+if psql_query "${FRESH_DB}" "
+INSERT INTO segment_definitions (
+    segment_id,
+    project_id,
+    segment_name,
+    source
+)
+VALUES (
+    'seg_invalid_global',
+    NULL,
+    'Invalid global segment',
+    'system_default'
+);
+" >/dev/null 2>&1; then
+    printf 'non-fallback segment unexpectedly accepted a null project_id\n' >&2
+    exit 1
+fi
+
 psql_file "${FRESH_DB}" "${ROOT_DIR}/postgres/dummy.sql"
 psql_file "${FRESH_DB}" "${ROOT_DIR}/postgres/dummy.sql"
+
+assert_query "${FRESH_DB}" "
+SELECT (project_id IS NULL)::int
+FROM segment_definitions
+WHERE segment_id = 'seg_existing_all';
+" '1'
+
 psql_file \
     "${FRESH_DB}" \
     "${ROOT_DIR}/postgres/tests/verify_promotion_run_segment_scope.sql"
@@ -142,6 +181,27 @@ for _ in 1 2; do
         "${LEGACY_DB}" \
         "${ROOT_DIR}/postgres/expand_promotion_run_segment_scope.sql"
 done
+
+assert_query "${LEGACY_DB}" "
+SELECT (
+    project_id IS NULL
+    AND campaign_id IS NULL
+    AND promotion_id IS NULL
+    AND query_preview_id IS NULL
+    AND source = 'system_default'
+)::int
+FROM segment_definitions
+WHERE segment_id = 'seg_existing_all';
+" '1'
+
+if psql_query "${LEGACY_DB}" "
+UPDATE segment_definitions
+SET project_id = 'demo_project'
+WHERE segment_id = 'seg_existing_all';
+" >/dev/null 2>&1; then
+    printf 'global fallback unexpectedly accepted project ownership\n' >&2
+    exit 1
+fi
 
 log 'confirming finalize-before-backfill failure and transaction rollback'
 if psql_file \
