@@ -98,6 +98,8 @@ ClickHouse는 `raw_events`를 원천으로 두고 `promotion_touch_events`, `boo
 `user_segment_assignments.segment_assignment_execution_id`는 nullable FK이므로 기존
 assignment row는 모두 `NULL`을 유지합니다. 기존 producer는 이 컬럼을 생략할 수
 있으며 `active_ad_serving_assignments` 정의와 hot path는 변경하지 않습니다.
+Assignment와 execution을 연결할 때 두 row의 `promotion_run_id`는 반드시 같아야
+하며 DB composite FK가 이를 보장합니다.
 
 실행 row의 `request_fingerprint`와 `input_fingerprint`는 lowercase SHA-256이고,
 `input_manifest_json`은 JSON object입니다. 동일 run에서 같은 request fingerprint는

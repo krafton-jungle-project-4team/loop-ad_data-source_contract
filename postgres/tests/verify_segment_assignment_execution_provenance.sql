@@ -112,6 +112,14 @@ END
 $$;
 
 SELECT pg_temp.expect_failure(
+    $sql$UPDATE user_segment_assignments
+         SET segment_assignment_execution_id = 'assignment_execution_exact_v1'
+         WHERE promotion_run_id = 'run_email_a1'
+           AND user_id = 'demo_user_email_awaiting'$sql$,
+    '23503'
+);
+
+SELECT pg_temp.expect_failure(
     format(
         $sql$INSERT INTO segment_assignment_executions (
             segment_assignment_execution_id,

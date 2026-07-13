@@ -356,6 +356,99 @@ for _ in 1 2; do
         "${ROOT_DIR}/postgres/expand_segment_assignment_execution_provenance.sql"
 done
 
+log 'confirming single-column execution FK repair'
+psql_query "${EXECUTION_BASE_DB}" "
+ALTER TABLE user_segment_assignments
+    DROP CONSTRAINT fk_user_segment_assignments_execution;
+ALTER TABLE user_segment_assignments
+    ADD CONSTRAINT fk_user_segment_assignments_execution
+    FOREIGN KEY (segment_assignment_execution_id)
+    REFERENCES segment_assignment_executions (
+        segment_assignment_execution_id
+    )
+    ON UPDATE NO ACTION
+    ON DELETE NO ACTION;
+" >/dev/null
+
+assert_query "${EXECUTION_BASE_DB}" "
+SELECT (array_length(conkey, 1) = 1)::int
+FROM pg_constraint
+WHERE conrelid = 'user_segment_assignments'::regclass
+  AND conname = 'fk_user_segment_assignments_execution';
+" '1'
+
+psql_query "${EXECUTION_BASE_DB}" "
+BEGIN;
+INSERT INTO segment_assignment_executions (
+    segment_assignment_execution_id,
+    promotion_run_id,
+    request_fingerprint,
+    input_fingerprint,
+    matcher_strategy,
+    matcher_version,
+    vector_version,
+    source_cutoff_at,
+    input_manifest_json
+) VALUES (
+    'single_fk_vulnerability_probe',
+    'run_onsite_a2',
+    repeat('9', 64),
+    repeat('8', 64),
+    'exact_probe',
+    'probe-v1',
+    'fixture-v1',
+    now(),
+    '{}'::jsonb
+);
+UPDATE user_segment_assignments
+SET segment_assignment_execution_id = 'single_fk_vulnerability_probe'
+WHERE promotion_run_id = 'run_email_a1'
+  AND user_id = 'demo_user_email_awaiting';
+ROLLBACK;
+" >/dev/null
+
+psql_file \
+    "${EXECUTION_BASE_DB}" \
+    "${ROOT_DIR}/postgres/expand_segment_assignment_execution_provenance.sql"
+
+assert_query "${EXECUTION_BASE_DB}" "
+SELECT (
+    contype = 'f'
+    AND confrelid = 'segment_assignment_executions'::regclass
+    AND conkey = ARRAY[
+        (
+            SELECT attnum::SMALLINT
+            FROM pg_attribute
+            WHERE attrelid = 'user_segment_assignments'::regclass
+              AND attname = 'promotion_run_id'
+        ),
+        (
+            SELECT attnum::SMALLINT
+            FROM pg_attribute
+            WHERE attrelid = 'user_segment_assignments'::regclass
+              AND attname = 'segment_assignment_execution_id'
+        )
+    ]::SMALLINT[]
+    AND confkey = ARRAY[
+        (
+            SELECT attnum::SMALLINT
+            FROM pg_attribute
+            WHERE attrelid = 'segment_assignment_executions'::regclass
+              AND attname = 'promotion_run_id'
+        ),
+        (
+            SELECT attnum::SMALLINT
+            FROM pg_attribute
+            WHERE attrelid = 'segment_assignment_executions'::regclass
+              AND attname = 'segment_assignment_execution_id'
+        )
+    ]::SMALLINT[]
+)::int
+FROM pg_constraint
+WHERE conrelid = 'user_segment_assignments'::regclass
+  AND conname = 'fk_user_segment_assignments_execution';
+" '1'
+
 assert_query "${EXECUTION_BASE_DB}" "
 SELECT count(*)
 FROM user_segment_assignments

@@ -1424,7 +1424,10 @@ CREATE TABLE IF NOT EXISTS segment_assignment_executions (
         CHECK (jsonb_typeof(input_manifest_json) = 'object'),
 
     CONSTRAINT uq_segment_assignment_executions_run_request
-        UNIQUE (promotion_run_id, request_fingerprint)
+        UNIQUE (promotion_run_id, request_fingerprint),
+
+    CONSTRAINT uq_segment_assignment_executions_run_execution
+        UNIQUE (promotion_run_id, segment_assignment_execution_id)
 );
 
 -- =========================================================
@@ -1457,8 +1460,12 @@ CREATE TABLE IF NOT EXISTS user_segment_assignments (
         FOREIGN KEY (promotion_run_id) REFERENCES promotion_runs (promotion_run_id),
 
     CONSTRAINT fk_user_segment_assignments_execution
-        FOREIGN KEY (segment_assignment_execution_id)
+        FOREIGN KEY (
+            promotion_run_id,
+            segment_assignment_execution_id
+        )
         REFERENCES segment_assignment_executions (
+            promotion_run_id,
             segment_assignment_execution_id
         )
         ON UPDATE NO ACTION
