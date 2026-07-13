@@ -19,6 +19,70 @@
 BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE OR REPLACE FUNCTION is_valid_promotion_run_segment_scope(
+    p_segment_scope_json JSONB,
+    p_segment_scope_fingerprint TEXT
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+PARALLEL SAFE
+AS $$
+DECLARE
+    scope_item JSONB;
+    segment_id TEXT;
+    canonical_scope_json JSONB;
+    canonical_scope_serialized TEXT;
+BEGIN
+    IF jsonb_typeof(p_segment_scope_json) <> 'array'
+       OR jsonb_array_length(p_segment_scope_json) = 0 THEN
+        RETURN false;
+    END IF;
+
+    FOR scope_item IN
+        SELECT value
+        FROM jsonb_array_elements(p_segment_scope_json) AS scope_items(value)
+    LOOP
+        IF jsonb_typeof(scope_item) <> 'string' THEN
+            RETURN false;
+        END IF;
+
+        segment_id := scope_item #>> '{}';
+        IF btrim(segment_id) = ''
+           OR segment_id <> btrim(segment_id)
+           OR segment_id = 'seg_existing_all' THEN
+            RETURN false;
+        END IF;
+    END LOOP;
+
+    SELECT
+        jsonb_agg(
+            normalized.segment_id
+            ORDER BY normalized.segment_id COLLATE "C"
+        ),
+        '[' || string_agg(
+            to_json(normalized.segment_id)::text,
+            ',' ORDER BY normalized.segment_id COLLATE "C"
+        ) || ']'
+    INTO canonical_scope_json, canonical_scope_serialized
+    FROM (
+        SELECT DISTINCT scope_values.value #>> '{}' AS segment_id
+        FROM jsonb_array_elements(p_segment_scope_json) AS scope_values(value)
+    ) AS normalized;
+
+    RETURN p_segment_scope_json = canonical_scope_json
+       AND p_segment_scope_fingerprint = encode(
+            digest(
+                convert_to(canonical_scope_serialized, 'UTF8'),
+                'sha256'
+            ),
+            'hex'
+       );
+END
+$$;
 
 -- =========================================================
 -- 0. Projects
@@ -742,6 +806,8 @@ CREATE TABLE IF NOT EXISTS promotion_runs (
     loop_count INT NOT NULL DEFAULT 1,
     status VARCHAR(50) NOT NULL DEFAULT 'planned',
     goal_snapshot_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    segment_scope_json JSONB NOT NULL,
+    segment_scope_fingerprint VARCHAR(64) NOT NULL,
 
     started_at TIMESTAMPTZ,
     ended_at TIMESTAMPTZ,
@@ -779,8 +845,21 @@ CREATE TABLE IF NOT EXISTS promotion_runs (
     CONSTRAINT chk_promotion_runs_loop_count
         CHECK (loop_count >= 1),
 
-    CONSTRAINT uq_promotion_runs_loop
-        UNIQUE (promotion_id, loop_count)
+    CONSTRAINT chk_promotion_runs_segment_scope
+        CHECK (is_valid_promotion_run_segment_scope(
+            segment_scope_json,
+            segment_scope_fingerprint
+        )),
+
+    CONSTRAINT uq_promotion_runs_segment_scope
+        UNIQUE (
+            project_id,
+            promotion_id,
+            analysis_id,
+            generation_id,
+            segment_scope_fingerprint,
+            loop_count
+        )
 );
 
 CREATE INDEX IF NOT EXISTS idx_promotion_runs_project_id
@@ -791,6 +870,9 @@ ON promotion_runs (campaign_id);
 
 CREATE INDEX IF NOT EXISTS idx_promotion_runs_promotion_id
 ON promotion_runs (promotion_id);
+
+CREATE INDEX IF NOT EXISTS idx_promotion_runs_promotion_loop
+ON promotion_runs (promotion_id, loop_count);
 
 CREATE INDEX IF NOT EXISTS idx_promotion_runs_status
 ON promotion_runs (status);
