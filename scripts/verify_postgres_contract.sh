@@ -106,7 +106,9 @@ docker run --detach --rm \
 postgres_ready=false
 for _ in $(seq 1 30); do
     if docker exec "${CONTAINER_NAME}" \
-        pg_isready -U "${POSTGRES_USER}" -d postgres >/dev/null 2>&1; then
+        sh -c 'test "$(cat /proc/1/comm)" = postgres' >/dev/null 2>&1 \
+        && docker exec "${CONTAINER_NAME}" \
+            pg_isready -U "${POSTGRES_USER}" -d postgres >/dev/null 2>&1; then
         postgres_ready=true
         break
     fi
