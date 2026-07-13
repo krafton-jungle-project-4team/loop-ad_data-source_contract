@@ -3,7 +3,8 @@
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BASE_REF="${BASE_REF:-origin/main}"
+REQUESTED_BASE_REF="${BASE_REF:-origin/main}"
+BASE_REF="${REQUESTED_BASE_REF}"
 POSTGRES_IMAGE="${POSTGRES_IMAGE:-pgvector/pgvector:0.8.0-pg16}"
 CONTAINER_NAME="loop-ad-contract-test-$$"
 POSTGRES_USER="postgres"
@@ -19,6 +20,31 @@ trap cleanup EXIT
 
 log() {
     printf '[postgres-contract] %s\n' "$*"
+}
+
+resolve_legacy_base_ref() {
+    local requested_ref="$1"
+    local candidate_ref
+
+    if ! git -C "${ROOT_DIR}" grep -q --fixed-strings \
+        'segment_scope_json' "${requested_ref}" -- postgres/schema.sql; then
+        printf '%s\n' "${requested_ref}"
+        return 0
+    fi
+
+    while IFS= read -r candidate_ref; do
+        if git -C "${ROOT_DIR}" cat-file -e \
+            "${candidate_ref}:postgres/schema.sql" 2>/dev/null \
+            && ! git -C "${ROOT_DIR}" grep -q --fixed-strings \
+                'segment_scope_json' "${candidate_ref}" -- postgres/schema.sql; then
+            printf '%s\n' "${candidate_ref}"
+            return 0
+        fi
+    done < <(git -C "${ROOT_DIR}" rev-list --first-parent "${requested_ref}")
+
+    printf 'could not resolve a pre-scope legacy schema from %s\n' \
+        "${requested_ref}" >&2
+    return 1
 }
 
 psql_file() {
@@ -63,7 +89,11 @@ assert_query() {
     fi
 }
 
-git -C "${ROOT_DIR}" rev-parse --verify "${BASE_REF}" >/dev/null
+git -C "${ROOT_DIR}" rev-parse --verify "${REQUESTED_BASE_REF}" >/dev/null
+BASE_REF="$(resolve_legacy_base_ref "${REQUESTED_BASE_REF}")"
+if [[ "${BASE_REF}" != "${REQUESTED_BASE_REF}" ]]; then
+    log "resolved legacy migration base ${REQUESTED_BASE_REF} -> ${BASE_REF}"
+fi
 
 log "starting isolated PostgreSQL (${POSTGRES_IMAGE})"
 docker run --detach --rm \
@@ -76,7 +106,9 @@ docker run --detach --rm \
 postgres_ready=false
 for _ in $(seq 1 30); do
     if docker exec "${CONTAINER_NAME}" \
-        pg_isready -U "${POSTGRES_USER}" -d postgres >/dev/null 2>&1; then
+        sh -c 'test "$(cat /proc/1/comm)" = postgres' >/dev/null 2>&1 \
+        && docker exec "${CONTAINER_NAME}" \
+            pg_isready -U "${POSTGRES_USER}" -d postgres >/dev/null 2>&1; then
         postgres_ready=true
         break
     fi
