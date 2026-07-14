@@ -5,12 +5,14 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REQUESTED_BASE_REF="${BASE_REF:-origin/main}"
 BASE_REF="${REQUESTED_BASE_REF}"
+EXECUTION_BASE_REF="${EXECUTION_BASE_REF:-ca4f456f40255ec758937a8c84ea7f5566cc9d0a}"
 POSTGRES_IMAGE="${POSTGRES_IMAGE:-pgvector/pgvector:0.8.0-pg16}"
 CONTAINER_NAME="loop-ad-contract-test-$$"
 POSTGRES_USER="postgres"
 POSTGRES_PASSWORD="loop-ad-contract-test"
 FRESH_DB="fresh_contract"
 LEGACY_DB="legacy_contract"
+EXECUTION_BASE_DB="execution_base_contract"
 
 cleanup() {
     docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
@@ -66,6 +68,17 @@ psql_git_file() {
             -U "${POSTGRES_USER}" -d "${database}"
 }
 
+psql_git_file_at() {
+    local database="$1"
+    local git_ref="$2"
+    local git_path="$3"
+
+    git -C "${ROOT_DIR}" show "${git_ref}:${git_path}" \
+        | docker exec -i "${CONTAINER_NAME}" \
+            psql -X -v ON_ERROR_STOP=1 \
+            -U "${POSTGRES_USER}" -d "${database}"
+}
+
 psql_query() {
     local database="$1"
     local query="$2"
@@ -90,6 +103,7 @@ assert_query() {
 }
 
 git -C "${ROOT_DIR}" rev-parse --verify "${REQUESTED_BASE_REF}" >/dev/null
+git -C "${ROOT_DIR}" rev-parse --verify "${EXECUTION_BASE_REF}" >/dev/null
 BASE_REF="$(resolve_legacy_base_ref "${REQUESTED_BASE_REF}")"
 if [[ "${BASE_REF}" != "${REQUESTED_BASE_REF}" ]]; then
     log "resolved legacy migration base ${REQUESTED_BASE_REF} -> ${BASE_REF}"
@@ -124,6 +138,8 @@ docker exec "${CONTAINER_NAME}" \
     createdb -U "${POSTGRES_USER}" "${FRESH_DB}"
 docker exec "${CONTAINER_NAME}" \
     createdb -U "${POSTGRES_USER}" "${LEGACY_DB}"
+docker exec "${CONTAINER_NAME}" \
+    createdb -U "${POSTGRES_USER}" "${EXECUTION_BASE_DB}"
 
 log 'verifying fresh schema and rerunnable dummy data'
 psql_file "${FRESH_DB}" "${ROOT_DIR}/postgres/schema.sql"
@@ -171,6 +187,10 @@ WHERE segment_id = 'seg_existing_all';
 psql_file \
     "${FRESH_DB}" \
     "${ROOT_DIR}/postgres/tests/verify_promotion_run_segment_scope.sql"
+
+psql_file \
+    "${FRESH_DB}" \
+    "${ROOT_DIR}/postgres/tests/verify_segment_assignment_execution_provenance.sql"
 
 log "verifying legacy migration from ${BASE_REF}"
 psql_git_file "${LEGACY_DB}" postgres/schema.sql
@@ -305,6 +325,162 @@ psql_file \
     "${LEGACY_DB}" \
     "${ROOT_DIR}/postgres/tests/verify_promotion_run_segment_scope.sql"
 
+log "verifying assignment execution expand from ${EXECUTION_BASE_REF}"
+psql_git_file_at \
+    "${EXECUTION_BASE_DB}" \
+    "${EXECUTION_BASE_REF}" \
+    postgres/schema.sql
+psql_git_file_at \
+    "${EXECUTION_BASE_DB}" \
+    "${EXECUTION_BASE_REF}" \
+    postgres/dummy.sql
+
+serving_view_before="$(psql_query "${EXECUTION_BASE_DB}" "
+SELECT pg_get_viewdef('active_ad_serving_assignments'::regclass, true);
+")"
+serving_rows_before="$(psql_query "${EXECUTION_BASE_DB}" "
+SELECT md5(COALESCE(string_agg(
+    to_jsonb(serving_row)::text,
+    E'\\n' ORDER BY
+        project_id,
+        promotion_run_id,
+        user_id,
+        ad_experiment_id
+), ''))
+FROM active_ad_serving_assignments AS serving_row;
+")"
+
+for _ in 1 2; do
+    psql_file \
+        "${EXECUTION_BASE_DB}" \
+        "${ROOT_DIR}/postgres/expand_segment_assignment_execution_provenance.sql"
+done
+
+log 'confirming single-column execution FK repair'
+psql_query "${EXECUTION_BASE_DB}" "
+ALTER TABLE user_segment_assignments
+    DROP CONSTRAINT fk_user_segment_assignments_execution;
+ALTER TABLE user_segment_assignments
+    ADD CONSTRAINT fk_user_segment_assignments_execution
+    FOREIGN KEY (segment_assignment_execution_id)
+    REFERENCES segment_assignment_executions (
+        segment_assignment_execution_id
+    )
+    ON UPDATE NO ACTION
+    ON DELETE NO ACTION;
+" >/dev/null
+
+assert_query "${EXECUTION_BASE_DB}" "
+SELECT (array_length(conkey, 1) = 1)::int
+FROM pg_constraint
+WHERE conrelid = 'user_segment_assignments'::regclass
+  AND conname = 'fk_user_segment_assignments_execution';
+" '1'
+
+psql_query "${EXECUTION_BASE_DB}" "
+BEGIN;
+INSERT INTO segment_assignment_executions (
+    segment_assignment_execution_id,
+    promotion_run_id,
+    request_fingerprint,
+    input_fingerprint,
+    matcher_strategy,
+    matcher_version,
+    vector_version,
+    source_cutoff_at,
+    input_manifest_json
+) VALUES (
+    'single_fk_vulnerability_probe',
+    'run_onsite_a2',
+    repeat('9', 64),
+    repeat('8', 64),
+    'exact_probe',
+    'probe-v1',
+    'fixture-v1',
+    now(),
+    '{}'::jsonb
+);
+UPDATE user_segment_assignments
+SET segment_assignment_execution_id = 'single_fk_vulnerability_probe'
+WHERE promotion_run_id = 'run_email_a1'
+  AND user_id = 'demo_user_email_awaiting';
+ROLLBACK;
+" >/dev/null
+
+psql_file \
+    "${EXECUTION_BASE_DB}" \
+    "${ROOT_DIR}/postgres/expand_segment_assignment_execution_provenance.sql"
+
+assert_query "${EXECUTION_BASE_DB}" "
+SELECT (
+    contype = 'f'
+    AND confrelid = 'segment_assignment_executions'::regclass
+    AND conkey = ARRAY[
+        (
+            SELECT attnum::SMALLINT
+            FROM pg_attribute
+            WHERE attrelid = 'user_segment_assignments'::regclass
+              AND attname = 'promotion_run_id'
+        ),
+        (
+            SELECT attnum::SMALLINT
+            FROM pg_attribute
+            WHERE attrelid = 'user_segment_assignments'::regclass
+              AND attname = 'segment_assignment_execution_id'
+        )
+    ]::SMALLINT[]
+    AND confkey = ARRAY[
+        (
+            SELECT attnum::SMALLINT
+            FROM pg_attribute
+            WHERE attrelid = 'segment_assignment_executions'::regclass
+              AND attname = 'promotion_run_id'
+        ),
+        (
+            SELECT attnum::SMALLINT
+            FROM pg_attribute
+            WHERE attrelid = 'segment_assignment_executions'::regclass
+              AND attname = 'segment_assignment_execution_id'
+        )
+    ]::SMALLINT[]
+)::int
+FROM pg_constraint
+WHERE conrelid = 'user_segment_assignments'::regclass
+  AND conname = 'fk_user_segment_assignments_execution';
+" '1'
+
+assert_query "${EXECUTION_BASE_DB}" "
+SELECT count(*)
+FROM user_segment_assignments
+WHERE segment_assignment_execution_id IS NOT NULL;
+" '0'
+
+serving_view_after="$(psql_query "${EXECUTION_BASE_DB}" "
+SELECT pg_get_viewdef('active_ad_serving_assignments'::regclass, true);
+")"
+serving_rows_after="$(psql_query "${EXECUTION_BASE_DB}" "
+SELECT md5(COALESCE(string_agg(
+    to_jsonb(serving_row)::text,
+    E'\\n' ORDER BY
+        project_id,
+        promotion_run_id,
+        user_id,
+        ad_experiment_id
+), ''))
+FROM active_ad_serving_assignments AS serving_row;
+")"
+
+if [[ "${serving_view_before}" != "${serving_view_after}" \
+      || "${serving_rows_before}" != "${serving_rows_after}" ]]; then
+    printf 'active serving definition or rows changed after provenance expand\n' \
+        >&2
+    exit 1
+fi
+
+psql_file \
+    "${EXECUTION_BASE_DB}" \
+    "${ROOT_DIR}/postgres/tests/verify_segment_assignment_execution_provenance.sql"
+
 log 'comparing fresh and migrated scope contract metadata'
 snapshot_query="
 WITH contract_metadata AS (
@@ -359,6 +535,71 @@ legacy_snapshot="$(psql_query "${LEGACY_DB}" "${snapshot_query}")"
 if [[ "${fresh_snapshot}" != "${legacy_snapshot}" ]]; then
     printf 'fresh and migrated contract metadata differ\nfresh:\n%s\nmigrated:\n%s\n' \
         "${fresh_snapshot}" "${legacy_snapshot}" >&2
+    exit 1
+fi
+
+log 'comparing fresh and migrated assignment execution metadata'
+execution_snapshot_query="
+WITH contract_metadata AS (
+    SELECT
+        'column|' || classes.relname || '|' || attributes.attnum || '|' ||
+        attributes.attname || '|' ||
+        format_type(attributes.atttypid, attributes.atttypmod) || '|' ||
+        attributes.attnotnull || '|' ||
+        COALESCE(pg_get_expr(defaults.adbin, defaults.adrelid), '') AS item
+    FROM pg_class AS classes
+    JOIN pg_attribute AS attributes
+      ON attributes.attrelid = classes.oid
+    LEFT JOIN pg_attrdef AS defaults
+      ON defaults.adrelid = classes.oid
+     AND defaults.adnum = attributes.attnum
+    WHERE (
+        classes.relname = 'segment_assignment_executions'
+        OR (
+            classes.relname = 'user_segment_assignments'
+            AND attributes.attname = 'segment_assignment_execution_id'
+        )
+    )
+      AND attributes.attnum > 0
+      AND NOT attributes.attisdropped
+
+    UNION ALL
+
+    SELECT
+        'constraint|' || classes.relname || '|' || constraints.conname || '|' ||
+        pg_get_constraintdef(constraints.oid) AS item
+    FROM pg_constraint AS constraints
+    JOIN pg_class AS classes
+      ON classes.oid = constraints.conrelid
+    WHERE classes.relname = 'segment_assignment_executions'
+       OR constraints.conname = 'fk_user_segment_assignments_execution'
+
+    UNION ALL
+
+    SELECT
+        'index|' || tablename || '|' || indexname || '|' || indexdef AS item
+    FROM pg_indexes
+    WHERE schemaname = current_schema()
+      AND (
+          tablename = 'segment_assignment_executions'
+          OR indexname = 'idx_user_segment_assignments_execution_id'
+      )
+)
+SELECT string_agg(item, E'\\n' ORDER BY item)
+FROM contract_metadata;
+"
+
+fresh_execution_snapshot="$(psql_query \
+    "${FRESH_DB}" \
+    "${execution_snapshot_query}")"
+migrated_execution_snapshot="$(psql_query \
+    "${EXECUTION_BASE_DB}" \
+    "${execution_snapshot_query}")"
+if [[ "${fresh_execution_snapshot}" != "${migrated_execution_snapshot}" ]]; then
+    printf 'fresh and migrated assignment execution metadata differ\n' >&2
+    printf 'fresh:\n%s\nmigrated:\n%s\n' \
+        "${fresh_execution_snapshot}" \
+        "${migrated_execution_snapshot}" >&2
     exit 1
 fi
 
