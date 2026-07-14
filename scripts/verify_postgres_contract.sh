@@ -4,8 +4,9 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REQUESTED_BASE_REF="${BASE_REF:-origin/main}"
-BASE_REF="${REQUESTED_BASE_REF}"
+PROMOTION_BASE_REF="${REQUESTED_BASE_REF}"
 EXECUTION_BASE_REF="${EXECUTION_BASE_REF:-ca4f456f40255ec758937a8c84ea7f5566cc9d0a}"
+GENERATION_BASE_REF="${REQUESTED_BASE_REF}"
 POSTGRES_IMAGE="${POSTGRES_IMAGE:-pgvector/pgvector:0.8.0-pg16}"
 CONTAINER_NAME="loop-ad-contract-test-$$"
 POSTGRES_USER="postgres"
@@ -13,6 +14,7 @@ POSTGRES_PASSWORD="loop-ad-contract-test"
 FRESH_DB="fresh_contract"
 LEGACY_DB="legacy_contract"
 EXECUTION_BASE_DB="execution_base_contract"
+GENERATION_LEGACY_DB="generation_legacy_contract"
 
 cleanup() {
     docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
@@ -24,7 +26,7 @@ log() {
     printf '[postgres-contract] %s\n' "$*"
 }
 
-resolve_legacy_base_ref() {
+resolve_promotion_base_ref() {
     local requested_ref="$1"
     local candidate_ref
 
@@ -49,6 +51,32 @@ resolve_legacy_base_ref() {
     return 1
 }
 
+resolve_generation_base_ref() {
+    local requested_ref="$1"
+    local candidate_ref
+    local marker='CREATE SCHEMA IF NOT EXISTS generation_rag'
+
+    if ! git -C "${ROOT_DIR}" grep -q --fixed-strings \
+        "${marker}" "${requested_ref}" -- postgres/schema.sql; then
+        printf '%s\n' "${requested_ref}"
+        return 0
+    fi
+
+    while IFS= read -r candidate_ref; do
+        if git -C "${ROOT_DIR}" cat-file -e \
+            "${candidate_ref}:postgres/schema.sql" 2>/dev/null \
+            && ! git -C "${ROOT_DIR}" grep -q --fixed-strings \
+                "${marker}" "${candidate_ref}" -- postgres/schema.sql; then
+            printf '%s\n' "${candidate_ref}"
+            return 0
+        fi
+    done < <(git -C "${ROOT_DIR}" rev-list --first-parent "${requested_ref}")
+
+    printf 'could not resolve a pre-Generation-v1 schema from %s\n' \
+        "${requested_ref}" >&2
+    return 1
+}
+
 psql_file() {
     local database="$1"
     local file="$2"
@@ -60,9 +88,10 @@ psql_file() {
 
 psql_git_file() {
     local database="$1"
-    local git_path="$2"
+    local git_ref="$2"
+    local git_path="$3"
 
-    git -C "${ROOT_DIR}" show "${BASE_REF}:${git_path}" \
+    git -C "${ROOT_DIR}" show "${git_ref}:${git_path}" \
         | docker exec -i "${CONTAINER_NAME}" \
             psql -X -v ON_ERROR_STOP=1 \
             -U "${POSTGRES_USER}" -d "${database}"
@@ -104,9 +133,13 @@ assert_query() {
 
 git -C "${ROOT_DIR}" rev-parse --verify "${REQUESTED_BASE_REF}" >/dev/null
 git -C "${ROOT_DIR}" rev-parse --verify "${EXECUTION_BASE_REF}" >/dev/null
-BASE_REF="$(resolve_legacy_base_ref "${REQUESTED_BASE_REF}")"
-if [[ "${BASE_REF}" != "${REQUESTED_BASE_REF}" ]]; then
-    log "resolved legacy migration base ${REQUESTED_BASE_REF} -> ${BASE_REF}"
+PROMOTION_BASE_REF="$(resolve_promotion_base_ref "${REQUESTED_BASE_REF}")"
+GENERATION_BASE_REF="$(resolve_generation_base_ref "${REQUESTED_BASE_REF}")"
+if [[ "${PROMOTION_BASE_REF}" != "${REQUESTED_BASE_REF}" ]]; then
+    log "resolved promotion legacy base ${REQUESTED_BASE_REF} -> ${PROMOTION_BASE_REF}"
+fi
+if [[ "${GENERATION_BASE_REF}" != "${REQUESTED_BASE_REF}" ]]; then
+    log "resolved Generation legacy base ${REQUESTED_BASE_REF} -> ${GENERATION_BASE_REF}"
 fi
 
 log "starting isolated PostgreSQL (${POSTGRES_IMAGE})"
@@ -140,6 +173,8 @@ docker exec "${CONTAINER_NAME}" \
     createdb -U "${POSTGRES_USER}" "${LEGACY_DB}"
 docker exec "${CONTAINER_NAME}" \
     createdb -U "${POSTGRES_USER}" "${EXECUTION_BASE_DB}"
+docker exec "${CONTAINER_NAME}" \
+    createdb -U "${POSTGRES_USER}" "${GENERATION_LEGACY_DB}"
 
 log 'verifying fresh schema and rerunnable dummy data'
 psql_file "${FRESH_DB}" "${ROOT_DIR}/postgres/schema.sql"
@@ -187,14 +222,16 @@ WHERE segment_id = 'seg_existing_all';
 psql_file \
     "${FRESH_DB}" \
     "${ROOT_DIR}/postgres/tests/verify_promotion_run_segment_scope.sql"
-
 psql_file \
     "${FRESH_DB}" \
     "${ROOT_DIR}/postgres/tests/verify_segment_assignment_execution_provenance.sql"
+psql_file \
+    "${FRESH_DB}" \
+    "${ROOT_DIR}/postgres/tests/verify_generation_v1.sql"
 
-log "verifying legacy migration from ${BASE_REF}"
-psql_git_file "${LEGACY_DB}" postgres/schema.sql
-psql_git_file "${LEGACY_DB}" postgres/dummy.sql
+log "verifying promotion legacy migration from ${PROMOTION_BASE_REF}"
+psql_git_file "${LEGACY_DB}" "${PROMOTION_BASE_REF}" postgres/schema.sql
+psql_git_file "${LEGACY_DB}" "${PROMOTION_BASE_REF}" postgres/dummy.sql
 
 for _ in 1 2; do
     psql_file \
@@ -600,6 +637,551 @@ if [[ "${fresh_execution_snapshot}" != "${migrated_execution_snapshot}" ]]; then
     printf 'fresh:\n%s\nmigrated:\n%s\n' \
         "${fresh_execution_snapshot}" \
         "${migrated_execution_snapshot}" >&2
+    exit 1
+fi
+
+log "verifying Generation v1 migration from ${GENERATION_BASE_REF}"
+psql_git_file \
+    "${GENERATION_LEGACY_DB}" \
+    "${GENERATION_BASE_REF}" \
+    postgres/schema.sql
+psql_git_file \
+    "${GENERATION_LEGACY_DB}" \
+    "${GENERATION_BASE_REF}" \
+    postgres/dummy.sql
+
+segment_vector_indexes_before="$(psql_query "${GENERATION_LEGACY_DB}" "
+SELECT string_agg(indexname || '|' || indexdef, E'\\n' ORDER BY indexname)
+FROM pg_indexes
+WHERE schemaname = 'public'
+  AND tablename = 'segment_vectors';
+")"
+
+for _ in 1 2; do
+    psql_file \
+        "${GENERATION_LEGACY_DB}" \
+        "${ROOT_DIR}/postgres/expand_generation_v1.sql"
+done
+
+log 'injecting representative Generation legacy recovery states'
+psql_query "${GENERATION_LEGACY_DB}" "
+UPDATE generation_runs
+SET status = 'running',
+    started_at = NULL,
+    finished_at = NULL,
+    worker_id = 'legacy-partial-worker',
+    lease_token = NULL,
+    heartbeat_at = created_at + interval '1 minute',
+    lease_expires_at = NULL
+WHERE generation_id = 'generation_email_a2';
+
+UPDATE generation_runs
+SET idempotency_key = 'legacy:preserved-identity',
+    request_fingerprint = repeat('a', 64)
+WHERE generation_id = 'generation_sms_a2';
+
+UPDATE content_candidates
+SET image_url = 'https://legacy.example.test/email-a1/image.jpg',
+    metadata_json = jsonb_build_object(
+        'creative',
+        jsonb_build_object(
+            'image_generation_status', 'completed',
+            'artifact',
+            jsonb_build_object(
+                'artifact_status', 'published',
+                'storage_key',
+                    'genai/legacy/generation_email_a1/creative.email.html',
+                'public_url',
+                    'https://legacy.example.test/email-a1/creative.email.html',
+                'sha256', repeat('b', 64),
+                'content_type', 'text/html; charset=utf-8'
+            )
+        )
+    ),
+    updated_at = '2026-01-02 03:04:05+00'::timestamptz
+WHERE content_id = 'content_email_a1_mobile';
+" >/dev/null
+
+log 'confirming Generation finalize-before-backfill failure and rollback'
+generation_finalize_failure_output=''
+if generation_finalize_failure_output="$(psql_file \
+    "${GENERATION_LEGACY_DB}" \
+    "${ROOT_DIR}/postgres/finalize_generation_v1.sql" 2>&1)"; then
+    printf 'Generation finalize unexpectedly succeeded before backfill\n' >&2
+    exit 1
+fi
+printf '%s\n' "${generation_finalize_failure_output}"
+
+assert_query "${GENERATION_LEGACY_DB}" "
+SELECT (
+    EXISTS (
+        SELECT 1
+        FROM generation_runs
+        WHERE status IN ('completed', 'failed')
+          AND (started_at IS NULL OR finished_at IS NULL)
+    )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'generation_runs'::regclass
+          AND conname IN (
+              'chk_generation_runs_running_lease',
+              'chk_generation_runs_terminal_times',
+              'chk_generation_runs_nonterminal_finished_at',
+              'chk_generation_runs_inactive_lease_cleared',
+              'chk_generation_runs_retry_schedule'
+          )
+          AND convalidated
+    )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'active_ad_serving_assignments'
+          AND column_name = 'creative_format'
+    )
+)::int;
+" '1'
+
+log 'confirming corrupt request identity fails without partial backfill'
+psql_query "${GENERATION_LEGACY_DB}" "
+ALTER TABLE generation_runs
+    DROP CONSTRAINT chk_generation_runs_idempotency_fingerprint;
+UPDATE generation_runs
+SET idempotency_key = 'legacy:corrupt-identity',
+    request_fingerprint = NULL
+WHERE generation_id = 'generation_onsite_a1';
+" >/dev/null
+
+generation_identity_failure_output=''
+if generation_identity_failure_output="$(psql_file \
+    "${GENERATION_LEGACY_DB}" \
+    "${ROOT_DIR}/postgres/backfill_generation_v1.sql" 2>&1)"; then
+    printf 'Generation backfill unexpectedly accepted corrupt identity\n' >&2
+    exit 1
+fi
+printf '%s\n' "${generation_identity_failure_output}"
+
+if [[ "${generation_identity_failure_output}" != *'[request_identity]'* \
+      || "${generation_identity_failure_output}" != \
+          *'generation_id=generation_onsite_a1'* ]]; then
+    printf 'Generation backfill failure did not identify corrupt identity\n' >&2
+    exit 1
+fi
+
+assert_query "${GENERATION_LEGACY_DB}" "
+SELECT (
+    (SELECT status = 'running'
+            AND started_at IS NULL
+            AND worker_id = 'legacy-partial-worker'
+            AND lease_token IS NULL
+            AND heartbeat_at IS NOT NULL
+            AND lease_expires_at IS NULL
+     FROM generation_runs
+     WHERE generation_id = 'generation_email_a2')
+    AND (SELECT idempotency_key = 'legacy:corrupt-identity'
+                AND request_fingerprint IS NULL
+         FROM generation_runs
+         WHERE generation_id = 'generation_onsite_a1')
+    AND (SELECT creative_format IS NULL
+                AND image_generation_status IS NULL
+                AND artifact_status IS NULL
+                AND artifact_storage_key IS NULL
+                AND artifact_public_url IS NULL
+                AND artifact_sha256 IS NULL
+                AND artifact_content_type IS NULL
+                AND artifact_published_at IS NULL
+         FROM content_candidates
+         WHERE content_id = 'content_email_a1_mobile')
+)::int;
+" '1'
+
+psql_query "${GENERATION_LEGACY_DB}" "
+UPDATE generation_runs
+SET idempotency_key = NULL,
+    request_fingerprint = NULL
+WHERE generation_id = 'generation_onsite_a1';
+" >/dev/null
+psql_file \
+    "${GENERATION_LEGACY_DB}" \
+    "${ROOT_DIR}/postgres/expand_generation_v1.sql"
+
+for _ in 1 2; do
+    psql_file \
+        "${GENERATION_LEGACY_DB}" \
+        "${ROOT_DIR}/postgres/backfill_generation_v1.sql"
+done
+
+assert_query "${GENERATION_LEGACY_DB}" "
+SELECT (
+    (SELECT status = 'requested'
+            AND started_at = created_at
+            AND finished_at IS NULL
+            AND worker_id IS NULL
+            AND lease_token IS NULL
+            AND heartbeat_at IS NULL
+            AND lease_expires_at IS NULL
+     FROM generation_runs
+     WHERE generation_id = 'generation_email_a2')
+    AND (SELECT idempotency_key = 'legacy:preserved-identity'
+                AND request_fingerprint::text = repeat('a', 64)
+         FROM generation_runs
+         WHERE generation_id = 'generation_sms_a2')
+    AND (SELECT creative_format = 'email_html'
+                AND image_generation_status = 'completed'
+                AND artifact_status = 'published'
+                AND artifact_storage_key =
+                    'genai/legacy/generation_email_a1/creative.email.html'
+                AND artifact_public_url =
+                    'https://legacy.example.test/email-a1/creative.email.html'
+                AND artifact_sha256::text = repeat('b', 64)
+                AND artifact_content_type = 'text/html; charset=utf-8'
+                AND artifact_published_at =
+                    '2026-01-02 03:04:05+00'::timestamptz
+         FROM content_candidates
+         WHERE content_id = 'content_email_a1_mobile')
+)::int;
+" '1'
+
+log 'confirming Generation finalize rejects incomplete completed legacy rows'
+generation_readiness_failure_output=''
+if generation_readiness_failure_output="$(psql_file \
+    "${GENERATION_LEGACY_DB}" \
+    "${ROOT_DIR}/postgres/finalize_generation_v1.sql" 2>&1)"; then
+    printf 'Generation finalize unexpectedly accepted incomplete completed rows\n' >&2
+    exit 1
+fi
+printf '%s\n' "${generation_readiness_failure_output}"
+
+if [[ "${generation_readiness_failure_output}" != \
+      *'[completed_candidate_count]'* ]]; then
+    printf 'Generation finalize failure did not identify candidate count damage\n' >&2
+    exit 1
+fi
+
+assert_query "${GENERATION_LEGACY_DB}" "
+SELECT (
+    EXISTS (
+        SELECT 1
+        FROM generation_runs AS run
+        JOIN content_candidates AS candidate USING (generation_id)
+        WHERE run.status = 'completed'
+          AND candidate.channel IN ('email', 'onsite_banner')
+          AND candidate.artifact_status = 'pending'
+    )
+    AND EXISTS (
+        SELECT 1
+        FROM generation_runs
+        WHERE generation_id = 'generation_onsite_a2'
+          AND content_option_count = 2
+    )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'generation_runs'::regclass
+          AND conname IN (
+              'chk_generation_runs_running_lease',
+              'chk_generation_runs_terminal_times',
+              'chk_generation_runs_nonterminal_finished_at',
+              'chk_generation_runs_inactive_lease_cleared',
+              'chk_generation_runs_retry_schedule'
+          )
+          AND convalidated
+    )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'active_ad_serving_assignments'
+          AND column_name = 'creative_format'
+    )
+)::int;
+" '1'
+
+log 'repairing legacy fixtures with current dummy data before final cutover'
+for _ in 1 2; do
+    psql_file \
+        "${GENERATION_LEGACY_DB}" \
+        "${ROOT_DIR}/postgres/dummy.sql"
+done
+
+log 'confirming finalize fails closed on a malformed immutable snapshot'
+psql_query "${GENERATION_LEGACY_DB}" "
+WITH damaged AS (
+    SELECT
+        generation_id,
+        jsonb_set(
+            input_json,
+            '{target_segments}',
+            '[{\"wrong_key\":\"seg_mobile_user\"}]'::jsonb
+        ) AS input_json
+    FROM generation_runs
+    WHERE generation_id = 'generation_email_a1'
+)
+UPDATE generation_runs AS generation
+SET input_json = damaged.input_json,
+    request_fingerprint = encode(
+        digest(convert_to(damaged.input_json::text, 'UTF8'), 'sha256'),
+        'hex'
+    )
+FROM damaged
+WHERE damaged.generation_id = generation.generation_id;
+" >/dev/null
+
+generation_snapshot_failure_output=''
+if generation_snapshot_failure_output="$(psql_file \
+    "${GENERATION_LEGACY_DB}" \
+    "${ROOT_DIR}/postgres/finalize_generation_v1.sql" 2>&1)"; then
+    printf 'Generation finalize unexpectedly accepted malformed snapshot\n' >&2
+    exit 1
+fi
+printf '%s\n' "${generation_snapshot_failure_output}"
+
+if [[ "${generation_snapshot_failure_output}" != \
+      *'[completed_target_snapshot]'* ]]; then
+    printf 'Generation finalize failure did not identify malformed snapshot\n' >&2
+    exit 1
+fi
+
+for _ in 1 2; do
+    psql_file \
+        "${GENERATION_LEGACY_DB}" \
+        "${ROOT_DIR}/postgres/dummy.sql"
+done
+
+log 'confirming a v1 request cannot fall back after losing its snapshot key'
+psql_query "${GENERATION_LEGACY_DB}" "
+WITH damaged AS (
+    SELECT
+        generation_id,
+        input_json - 'target_segments' AS input_json
+    FROM generation_runs
+    WHERE generation_id = 'generation_email_a1'
+)
+UPDATE generation_runs AS generation
+SET input_json = damaged.input_json,
+    request_fingerprint = encode(
+        digest(convert_to(damaged.input_json::text, 'UTF8'), 'sha256'),
+        'hex'
+    )
+FROM damaged
+WHERE damaged.generation_id = generation.generation_id;
+" >/dev/null
+
+generation_missing_snapshot_output=''
+if generation_missing_snapshot_output="$(psql_file \
+    "${GENERATION_LEGACY_DB}" \
+    "${ROOT_DIR}/postgres/finalize_generation_v1.sql" 2>&1)"; then
+    printf 'Generation finalize unexpectedly accepted a missing v1 snapshot\n' >&2
+    exit 1
+fi
+printf '%s\n' "${generation_missing_snapshot_output}"
+
+if [[ "${generation_missing_snapshot_output}" != \
+      *'[completed_target_snapshot]'* ]]; then
+    printf 'Generation finalize treated a missing v1 snapshot as legacy\n' >&2
+    exit 1
+fi
+
+for _ in 1 2; do
+    psql_file \
+        "${GENERATION_LEGACY_DB}" \
+        "${ROOT_DIR}/postgres/dummy.sql"
+done
+
+log 'confirming candidate readiness is enforced independently of count'
+psql_query "${GENERATION_LEGACY_DB}" "
+UPDATE content_candidates
+SET artifact_status = 'pending'
+WHERE content_id = 'content_email_a1_mobile';
+" >/dev/null
+
+generation_readiness_only_output=''
+if generation_readiness_only_output="$(psql_file \
+    "${GENERATION_LEGACY_DB}" \
+    "${ROOT_DIR}/postgres/finalize_generation_v1.sql" 2>&1)"; then
+    printf 'Generation finalize unexpectedly accepted an unready candidate\n' >&2
+    exit 1
+fi
+printf '%s\n' "${generation_readiness_only_output}"
+
+if [[ "${generation_readiness_only_output}" != \
+      *'[completed_candidate_readiness]'* ]]; then
+    printf 'Generation finalize did not identify readiness-only damage\n' >&2
+    exit 1
+fi
+
+for _ in 1 2; do
+    psql_file \
+        "${GENERATION_LEGACY_DB}" \
+        "${ROOT_DIR}/postgres/dummy.sql"
+done
+
+log 'confirming artifact publication must precede Generation completion'
+psql_query "${GENERATION_LEGACY_DB}" "
+UPDATE content_candidates AS candidate
+SET artifact_published_at = generation.finished_at + interval '1 minute'
+FROM generation_runs AS generation
+WHERE candidate.generation_id = generation.generation_id
+  AND candidate.content_id = 'content_email_a1_mobile';
+" >/dev/null
+
+generation_timeline_failure_output=''
+if generation_timeline_failure_output="$(psql_file \
+    "${GENERATION_LEGACY_DB}" \
+    "${ROOT_DIR}/postgres/finalize_generation_v1.sql" 2>&1)"; then
+    printf 'Generation finalize unexpectedly accepted a late artifact\n' >&2
+    exit 1
+fi
+printf '%s\n' "${generation_timeline_failure_output}"
+
+if [[ "${generation_timeline_failure_output}" != \
+      *'[completed_candidate_timeline]'* ]]; then
+    printf 'Generation finalize did not identify artifact timeline damage\n' >&2
+    exit 1
+fi
+
+for _ in 1 2; do
+    psql_file \
+        "${GENERATION_LEGACY_DB}" \
+        "${ROOT_DIR}/postgres/dummy.sql"
+done
+
+for _ in 1 2; do
+    psql_file \
+        "${GENERATION_LEGACY_DB}" \
+        "${ROOT_DIR}/postgres/finalize_generation_v1.sql"
+done
+
+psql_file \
+    "${GENERATION_LEGACY_DB}" \
+    "${ROOT_DIR}/postgres/tests/verify_promotion_run_segment_scope.sql"
+psql_file \
+    "${GENERATION_LEGACY_DB}" \
+    "${ROOT_DIR}/postgres/tests/verify_segment_assignment_execution_provenance.sql"
+psql_file \
+    "${GENERATION_LEGACY_DB}" \
+    "${ROOT_DIR}/postgres/tests/verify_generation_v1.sql"
+
+log 'rerunning the complete Generation migration chain on final state'
+for migration_file in \
+    expand_generation_v1.sql \
+    backfill_generation_v1.sql \
+    finalize_generation_v1.sql; do
+    psql_file \
+        "${GENERATION_LEGACY_DB}" \
+        "${ROOT_DIR}/postgres/${migration_file}"
+done
+
+psql_file \
+    "${GENERATION_LEGACY_DB}" \
+    "${ROOT_DIR}/postgres/tests/verify_promotion_run_segment_scope.sql"
+psql_file \
+    "${GENERATION_LEGACY_DB}" \
+    "${ROOT_DIR}/postgres/tests/verify_segment_assignment_execution_provenance.sql"
+psql_file \
+    "${GENERATION_LEGACY_DB}" \
+    "${ROOT_DIR}/postgres/tests/verify_generation_v1.sql"
+
+segment_vector_indexes_after="$(psql_query "${GENERATION_LEGACY_DB}" "
+SELECT string_agg(indexname || '|' || indexdef, E'\\n' ORDER BY indexname)
+FROM pg_indexes
+WHERE schemaname = 'public'
+  AND tablename = 'segment_vectors';
+")"
+if [[ "${segment_vector_indexes_before}" != "${segment_vector_indexes_after}" ]]; then
+    printf 'Generation migration changed segment_vectors indexes\nbefore:\n%s\nafter:\n%s\n' \
+        "${segment_vector_indexes_before}" "${segment_vector_indexes_after}" >&2
+    exit 1
+fi
+
+log 'comparing fresh and migrated Generation contract metadata'
+generation_snapshot_query="
+WITH contract_relations AS (
+    SELECT 'public.generation_runs'::regclass AS relation_id
+    UNION ALL
+    SELECT 'public.content_candidates'::regclass
+    UNION ALL
+    SELECT 'generation_rag.retrieval_documents'::regclass
+), contract_metadata AS (
+    SELECT
+        'column|' || relation_namespace.nspname || '.' ||
+        relation.relname || '|' || attribute.attnum || '|' ||
+        attribute.attname || '|' ||
+        format_type(attribute.atttypid, attribute.atttypmod) || '|' ||
+        attribute.attnotnull || '|' ||
+        COALESCE(pg_get_expr(attribute_default.adbin, attribute_default.adrelid), '')
+            AS item
+    FROM contract_relations
+    JOIN pg_class AS relation
+      ON relation.oid = contract_relations.relation_id
+    JOIN pg_namespace AS relation_namespace
+      ON relation_namespace.oid = relation.relnamespace
+    JOIN pg_attribute AS attribute
+      ON attribute.attrelid = relation.oid
+     AND attribute.attnum > 0
+     AND NOT attribute.attisdropped
+    LEFT JOIN pg_attrdef AS attribute_default
+      ON attribute_default.adrelid = attribute.attrelid
+     AND attribute_default.adnum = attribute.attnum
+
+    UNION ALL
+
+    SELECT
+        'constraint|' || constraint_namespace.nspname || '.' ||
+        relation.relname || '|' || constraint_definition.conname || '|' ||
+        constraint_definition.contype::text || '|' ||
+        constraint_definition.convalidated || '|' ||
+        pg_get_constraintdef(constraint_definition.oid) AS item
+    FROM contract_relations
+    JOIN pg_constraint AS constraint_definition
+      ON constraint_definition.conrelid = contract_relations.relation_id
+    JOIN pg_class AS relation
+      ON relation.oid = constraint_definition.conrelid
+    JOIN pg_namespace AS constraint_namespace
+      ON constraint_namespace.oid = relation.relnamespace
+
+    UNION ALL
+
+    SELECT
+        'index|' || schemaname || '.' || tablename || '|' ||
+        indexname || '|' || indexdef AS item
+    FROM pg_indexes
+    WHERE (schemaname, tablename) IN (
+        ('public', 'generation_runs'),
+        ('public', 'content_candidates'),
+        ('generation_rag', 'retrieval_documents')
+    )
+
+    UNION ALL
+
+    SELECT
+        'view|' || md5(
+            pg_get_viewdef('public.active_ad_serving_assignments'::regclass, true)
+        ) AS item
+
+    UNION ALL
+
+    SELECT
+        'view_column|' || ordinal_position || '|' || column_name || '|' ||
+        data_type AS item
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'active_ad_serving_assignments'
+)
+SELECT string_agg(item, E'\\n' ORDER BY item)
+FROM contract_metadata;
+"
+
+fresh_generation_snapshot="$(psql_query \
+    "${FRESH_DB}" \
+    "${generation_snapshot_query}")"
+legacy_generation_snapshot="$(psql_query \
+    "${GENERATION_LEGACY_DB}" \
+    "${generation_snapshot_query}")"
+if [[ "${fresh_generation_snapshot}" != "${legacy_generation_snapshot}" ]]; then
+    printf 'fresh and migrated Generation metadata differ\nfresh:\n%s\nmigrated:\n%s\n' \
+        "${fresh_generation_snapshot}" "${legacy_generation_snapshot}" >&2
     exit 1
 fi
 

@@ -1,6 +1,6 @@
 -- =========================================================
--- Loop-Ad PostgreSQL Schema Contract v1.7
--- Draft: promotion segment suggestion / confirmation flow
+-- Loop-Ad PostgreSQL Schema Contract v1.8
+-- Draft: promotion scope plus Generation v1 async/artifact/RAG contracts
 -- Owner: loop-ad_data-source_contract
 -- Domain: hotel / accommodation booking
 --
@@ -745,6 +745,21 @@ CREATE TABLE IF NOT EXISTS generation_runs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
+    -- Generation v1 columns are appended to preserve the legacy physical
+    -- column order across fresh and expanded databases.
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ,
+    retry_count INT NOT NULL DEFAULT 0,
+    next_retry_at TIMESTAMPTZ,
+    last_error_code VARCHAR(100),
+    last_error_message TEXT,
+    worker_id VARCHAR(200),
+    lease_token UUID,
+    heartbeat_at TIMESTAMPTZ,
+    lease_expires_at TIMESTAMPTZ,
+    idempotency_key VARCHAR(200),
+    request_fingerprint CHAR(64),
+
     CONSTRAINT fk_generation_runs_analysis
         FOREIGN KEY (analysis_id) REFERENCES promotion_analyses (analysis_id),
 
@@ -761,7 +776,63 @@ CREATE TABLE IF NOT EXISTS generation_runs (
         CHECK (status IN ('requested', 'running', 'completed', 'failed')),
 
     CONSTRAINT chk_generation_runs_option_count
-        CHECK (content_option_count >= 1)
+        CHECK (content_option_count >= 1),
+
+    CONSTRAINT chk_generation_runs_retry_count
+        CHECK (retry_count >= 0),
+
+    CONSTRAINT chk_generation_runs_fingerprint
+        CHECK (
+            request_fingerprint IS NULL
+            OR request_fingerprint ~ '^[0-9a-f]{64}$'
+        ),
+
+    CONSTRAINT chk_generation_runs_idempotency_fingerprint
+        CHECK (
+            idempotency_key IS NULL
+            OR request_fingerprint IS NOT NULL
+        ),
+
+    CONSTRAINT chk_generation_runs_running_lease
+        CHECK (
+            status <> 'running'
+            OR (
+                started_at IS NOT NULL
+                AND worker_id IS NOT NULL
+                AND lease_token IS NOT NULL
+                AND heartbeat_at IS NOT NULL
+                AND lease_expires_at IS NOT NULL
+            )
+        ),
+
+    CONSTRAINT chk_generation_runs_terminal_times
+        CHECK (
+            status NOT IN ('completed', 'failed')
+            OR (started_at IS NOT NULL AND finished_at IS NOT NULL)
+        ),
+
+    CONSTRAINT chk_generation_runs_nonterminal_finished_at
+        CHECK (
+            status IN ('completed', 'failed')
+            OR finished_at IS NULL
+        ),
+
+    CONSTRAINT chk_generation_runs_inactive_lease_cleared
+        CHECK (
+            status = 'running'
+            OR (
+                worker_id IS NULL
+                AND lease_token IS NULL
+                AND heartbeat_at IS NULL
+                AND lease_expires_at IS NULL
+            )
+        ),
+
+    CONSTRAINT chk_generation_runs_retry_schedule
+        CHECK (
+            next_retry_at IS NULL
+            OR status = 'requested'
+        )
 );
 
 CREATE INDEX IF NOT EXISTS idx_generation_runs_analysis_id
@@ -772,6 +843,22 @@ ON generation_runs (promotion_id);
 
 CREATE INDEX IF NOT EXISTS idx_generation_runs_status
 ON generation_runs (status);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_generation_runs_project_idempotency
+ON generation_runs (project_id, idempotency_key)
+WHERE idempotency_key IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_generation_runs_claimable
+ON generation_runs (
+    COALESCE(next_retry_at, created_at),
+    created_at,
+    generation_id
+)
+WHERE status = 'requested';
+
+CREATE INDEX IF NOT EXISTS idx_generation_runs_expired_lease
+ON generation_runs (lease_expires_at)
+WHERE status = 'running';
 
 -- =========================================================
 -- 10. Content Candidates
@@ -802,7 +889,7 @@ CREATE TABLE IF NOT EXISTS content_candidates (
     -- sms
     message TEXT,
 
-    -- onsite_banner
+    -- email / onsite_banner image
     image_prompt TEXT,
     image_url TEXT,
 
@@ -816,6 +903,18 @@ CREATE TABLE IF NOT EXISTS content_candidates (
     status VARCHAR(50) NOT NULL DEFAULT 'draft',
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    -- Generation v1 columns are appended to preserve the legacy physical
+    -- column order across fresh and expanded databases.
+    creative_format VARCHAR(50),
+    image_generation_status VARCHAR(50),
+    artifact_status VARCHAR(50),
+    artifact_storage_key TEXT,
+    artifact_public_url TEXT,
+    artifact_sha256 CHAR(64),
+    artifact_content_type VARCHAR(100),
+    artifact_error_code VARCHAR(100),
+    artifact_published_at TIMESTAMPTZ,
 
     CONSTRAINT fk_content_candidates_generation
         FOREIGN KEY (generation_id) REFERENCES generation_runs (generation_id),
@@ -841,6 +940,83 @@ CREATE TABLE IF NOT EXISTS content_candidates (
     CONSTRAINT chk_content_candidates_status
         CHECK (status IN ('draft', 'approved', 'rejected', 'active', 'archived')),
 
+    CONSTRAINT chk_content_candidates_creative_format
+        CHECK (
+            creative_format IS NULL
+            OR creative_format IN ('email_html', 'banner_html', 'sms_text')
+        ),
+
+    CONSTRAINT chk_content_candidates_channel_format
+        CHECK (
+            creative_format IS NULL
+            OR (channel = 'email' AND creative_format = 'email_html')
+            OR (channel = 'onsite_banner' AND creative_format = 'banner_html')
+            OR (channel = 'sms' AND creative_format = 'sms_text')
+        ),
+
+    CONSTRAINT chk_content_candidates_image_generation_status
+        CHECK (
+            image_generation_status IS NULL
+            OR image_generation_status IN (
+                'not_required', 'pending', 'running', 'completed', 'failed'
+            )
+        ),
+
+    CONSTRAINT chk_content_candidates_artifact_status
+        CHECK (
+            artifact_status IS NULL
+            OR artifact_status IN ('not_required', 'pending', 'published', 'failed')
+        ),
+
+    CONSTRAINT chk_content_candidates_channel_lifecycle
+        CHECK (
+            creative_format IS NULL
+            OR image_generation_status IS NULL
+            OR artifact_status IS NULL
+            OR (
+                creative_format = 'sms_text'
+                AND image_generation_status = 'not_required'
+                AND artifact_status = 'not_required'
+            )
+            OR (
+                creative_format IN ('email_html', 'banner_html')
+                AND image_generation_status IN (
+                    'pending', 'running', 'completed', 'failed'
+                )
+                AND artifact_status IN ('pending', 'published', 'failed')
+            )
+        ),
+
+    CONSTRAINT chk_content_candidates_artifact_sha256
+        CHECK (
+            artifact_sha256 IS NULL
+            OR artifact_sha256 ~ '^[0-9a-f]{64}$'
+        ),
+
+    CONSTRAINT chk_content_candidates_completed_image
+        CHECK (
+            image_generation_status IS DISTINCT FROM 'completed'
+            OR image_url IS NOT NULL
+        ),
+
+    CONSTRAINT chk_content_candidates_published_artifact
+        CHECK (
+            artifact_status IS DISTINCT FROM 'published'
+            OR (
+                artifact_storage_key IS NOT NULL
+                AND artifact_public_url IS NOT NULL
+                AND artifact_sha256 IS NOT NULL
+                AND artifact_content_type IS NOT NULL
+                AND artifact_published_at IS NOT NULL
+            )
+        ),
+
+    CONSTRAINT chk_content_candidates_artifact_error
+        CHECK (
+            artifact_status IS DISTINCT FROM 'failed'
+            OR artifact_error_code IS NOT NULL
+        ),
+
     CONSTRAINT uq_content_candidates_option
         UNIQUE (generation_id, segment_id, content_option_id)
 );
@@ -860,6 +1036,92 @@ ON content_candidates (status);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_content_candidates_one_approved_per_segment
 ON content_candidates (generation_id, segment_id)
 WHERE status IN ('approved', 'active');
+
+CREATE INDEX IF NOT EXISTS idx_content_candidates_artifact_status
+ON content_candidates (generation_id, artifact_status);
+
+-- =========================================================
+-- 10A. Generation RAG Retrieval Documents
+-- Logical ownership boundary for Generation v1. The shared application role
+-- remains unchanged; every retrieval must still hard-filter project_id.
+-- =========================================================
+CREATE SCHEMA IF NOT EXISTS generation_rag;
+
+CREATE TABLE IF NOT EXISTS generation_rag.retrieval_documents (
+    document_id VARCHAR(100) PRIMARY KEY,
+    project_id VARCHAR(100) NOT NULL,
+    context_version VARCHAR(100) NOT NULL,
+
+    source_kind VARCHAR(50) NOT NULL,
+    source_id VARCHAR(200) NOT NULL,
+    source_version VARCHAR(100) NOT NULL,
+    chunk_index INT NOT NULL DEFAULT 0,
+
+    s3_key TEXT,
+    document_text TEXT NOT NULL DEFAULT '',
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+    embedding vector(1024),
+    embedding_model VARCHAR(100) NOT NULL,
+    embedding_version VARCHAR(100) NOT NULL,
+    content_sha256 CHAR(64) NOT NULL,
+
+    status VARCHAR(50) NOT NULL DEFAULT 'pending',
+    last_error_code VARCHAR(100),
+    last_error_message TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT fk_generation_rag_project
+        FOREIGN KEY (project_id) REFERENCES public.projects (project_id),
+
+    CONSTRAINT chk_generation_rag_source_kind
+        CHECK (source_kind IN (
+            'brand_asset', 'brand_guide', 'historical_creative'
+        )),
+
+    CONSTRAINT chk_generation_rag_chunk_index
+        CHECK (chunk_index >= 0),
+
+    CONSTRAINT chk_generation_rag_status
+        CHECK (status IN ('pending', 'active', 'failed', 'archived')),
+
+    CONSTRAINT chk_generation_rag_active_embedding
+        CHECK (status <> 'active' OR embedding IS NOT NULL),
+
+    CONSTRAINT chk_generation_rag_content_sha256
+        CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
+
+    CONSTRAINT uq_generation_rag_source_context_chunk_embedding
+        UNIQUE (
+            project_id,
+            context_version,
+            source_kind,
+            source_id,
+            source_version,
+            chunk_index,
+            embedding_model,
+            embedding_version
+        )
+);
+
+CREATE INDEX IF NOT EXISTS idx_generation_rag_retrieval_filter
+ON generation_rag.retrieval_documents (
+    project_id,
+    context_version,
+    source_kind,
+    status,
+    embedding_model,
+    embedding_version
+);
+
+CREATE INDEX IF NOT EXISTS idx_generation_rag_source
+ON generation_rag.retrieval_documents (
+    project_id,
+    source_kind,
+    source_id,
+    source_version
+);
 
 -- =========================================================
 -- 11. Promotion Runs
@@ -1697,12 +1959,19 @@ SELECT
     cc.image_prompt,
     cc.image_url,
     cc.landing_url,
-    cc.status AS content_status
+    cc.status AS content_status,
+    cc.creative_format,
+    cc.image_generation_status,
+    cc.artifact_status,
+    cc.artifact_public_url,
+    cc.artifact_content_type
 FROM user_segment_assignments usa
 JOIN ad_experiments ae
   ON usa.ad_experiment_id = ae.ad_experiment_id
 JOIN content_candidates cc
   ON usa.content_id = cc.content_id
+JOIN generation_runs gr
+  ON cc.generation_id = gr.generation_id
 -- Re-evaluation may change the latest evaluation result without changing execution state.
 -- Legacy serving therefore requires matching historical provenance, not latest-status equality.
 WHERE (
@@ -1725,6 +1994,22 @@ WHERE (
         )
     )
   AND cc.status IN ('approved', 'active')
+  AND gr.status = 'completed'
+  AND (
+        (
+            cc.channel = 'sms'
+            AND cc.message IS NOT NULL
+            AND cc.artifact_status = 'not_required'
+        )
+        OR
+        (
+            cc.channel IN ('email', 'onsite_banner')
+            AND cc.image_generation_status = 'completed'
+            AND cc.image_url IS NOT NULL
+            AND cc.artifact_status = 'published'
+            AND cc.artifact_public_url IS NOT NULL
+        )
+      )
   AND (usa.expires_at IS NULL OR usa.expires_at > now());
 
 -- =========================================================

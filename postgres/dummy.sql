@@ -614,15 +614,27 @@ INSERT INTO generation_runs (
     input_json,
     output_json,
     generation_report_json,
-    status
+    status,
+    started_at,
+    finished_at,
+    retry_count,
+    next_retry_at,
+    last_error_code,
+    last_error_message,
+    worker_id,
+    lease_token,
+    heartbeat_at,
+    lease_expires_at,
+    idempotency_key,
+    request_fingerprint
 )
 VALUES
-('generation_email_a1', 'analysis_email_a1', 'demo_project', 'camp_expedia_hotel_demo', 'promo_expedia_email_reactivation', 1, 'Generate the first email candidate.', '{"loop_count":1}'::jsonb, '{"status":"completed"}'::jsonb, '{"fixture":true}'::jsonb, 'completed'),
-('generation_email_a2', 'analysis_email_a2', 'demo_project', 'camp_expedia_hotel_demo', 'promo_expedia_email_reactivation', 3, 'Generate three candidates for manual approval.', '{"loop_count":2}'::jsonb, '{"status":"completed"}'::jsonb, '{"fixture":true}'::jsonb, 'completed'),
-('generation_onsite_a1', 'analysis_onsite_a1', 'demo_project', 'camp_expedia_hotel_demo', 'promo_expedia_onsite_last_minute', 1, 'Generate the first onsite candidate.', '{"loop_count":1}'::jsonb, '{"status":"completed"}'::jsonb, '{"fixture":true}'::jsonb, 'completed'),
-('generation_onsite_a2', 'analysis_onsite_a2', 'demo_project', 'camp_expedia_hotel_demo', 'promo_expedia_onsite_last_minute', 2, 'Generate the activated child candidate set.', '{"loop_count":2}'::jsonb, '{"status":"completed"}'::jsonb, '{"fixture":true}'::jsonb, 'completed'),
-('generation_sms_a1', 'analysis_sms_a1', 'demo_project', 'camp_expedia_hotel_demo', 'promo_expedia_sms_near_checkin', 1, 'Generate the first SMS candidates.', '{"loop_count":1}'::jsonb, '{"status":"completed"}'::jsonb, '{"fixture":true}'::jsonb, 'completed'),
-('generation_sms_a2', 'analysis_sms_a2', 'demo_project', 'camp_expedia_hotel_demo', 'promo_expedia_sms_near_checkin', 2, 'Generate rejected next-loop candidates.', '{"loop_count":2}'::jsonb, '{"status":"completed"}'::jsonb, '{"fixture":true}'::jsonb, 'completed')
+('generation_email_a1', 'analysis_email_a1', 'demo_project', 'camp_expedia_hotel_demo', 'promo_expedia_email_reactivation', 1, 'Generate the first email candidate.', '{"schema_version":"generation.request.v1","project_id":"demo_project","campaign_id":"camp_expedia_hotel_demo","promotion_id":"promo_expedia_email_reactivation","analysis_id":"analysis_email_a1","channel":"email","loop_count":1,"brand_context":{"context_version":"v1","manifest_key":"brand-context/demo_project/manifests/v1/manifest.json"}}'::jsonb, '{"status":"completed"}'::jsonb, '{"fixture":true}'::jsonb, 'completed', now() - interval '3 days 10 minutes', now() - interval '3 days 5 minutes', 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'fixture:generation_email_a1', encode(digest(convert_to('generation_email_a1', 'UTF8'), 'sha256'), 'hex')),
+('generation_email_a2', 'analysis_email_a2', 'demo_project', 'camp_expedia_hotel_demo', 'promo_expedia_email_reactivation', 3, 'Generate three candidates for manual approval.', '{"schema_version":"generation.request.v1","project_id":"demo_project","campaign_id":"camp_expedia_hotel_demo","promotion_id":"promo_expedia_email_reactivation","analysis_id":"analysis_email_a2","channel":"email","loop_count":2,"brand_context":{"context_version":"v1","manifest_key":"brand-context/demo_project/manifests/v1/manifest.json"}}'::jsonb, '{"status":"completed"}'::jsonb, '{"fixture":true}'::jsonb, 'completed', now() - interval '6 hours', now() - interval '5 hours 50 minutes', 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'fixture:generation_email_a2', encode(digest(convert_to('generation_email_a2', 'UTF8'), 'sha256'), 'hex')),
+('generation_onsite_a1', 'analysis_onsite_a1', 'demo_project', 'camp_expedia_hotel_demo', 'promo_expedia_onsite_last_minute', 1, 'Generate the first onsite candidate.', '{"schema_version":"generation.request.v1","project_id":"demo_project","campaign_id":"camp_expedia_hotel_demo","promotion_id":"promo_expedia_onsite_last_minute","analysis_id":"analysis_onsite_a1","channel":"onsite_banner","loop_count":1,"brand_context":{"context_version":"v1","manifest_key":"brand-context/demo_project/manifests/v1/manifest.json"}}'::jsonb, '{"status":"completed"}'::jsonb, '{"fixture":true}'::jsonb, 'completed', now() - interval '2 days 10 minutes', now() - interval '2 days 5 minutes', 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'fixture:generation_onsite_a1', encode(digest(convert_to('generation_onsite_a1', 'UTF8'), 'sha256'), 'hex')),
+('generation_onsite_a2', 'analysis_onsite_a2', 'demo_project', 'camp_expedia_hotel_demo', 'promo_expedia_onsite_last_minute', 1, 'Generate the activated child candidate set.', '{"schema_version":"generation.request.v1","project_id":"demo_project","campaign_id":"camp_expedia_hotel_demo","promotion_id":"promo_expedia_onsite_last_minute","analysis_id":"analysis_onsite_a2","channel":"onsite_banner","loop_count":2,"brand_context":{"context_version":"v1","manifest_key":"brand-context/demo_project/manifests/v1/manifest.json"}}'::jsonb, '{"status":"completed"}'::jsonb, '{"fixture":true}'::jsonb, 'completed', now() - interval '1 hour 10 minutes', now() - interval '1 hour 5 minutes', 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'fixture:generation_onsite_a2', encode(digest(convert_to('generation_onsite_a2', 'UTF8'), 'sha256'), 'hex')),
+('generation_sms_a1', 'analysis_sms_a1', 'demo_project', 'camp_expedia_hotel_demo', 'promo_expedia_sms_near_checkin', 1, 'Generate the first SMS candidates.', '{"schema_version":"generation.request.v1","project_id":"demo_project","campaign_id":"camp_expedia_hotel_demo","promotion_id":"promo_expedia_sms_near_checkin","analysis_id":"analysis_sms_a1","channel":"sms","loop_count":1,"brand_context":{"context_version":"v1","manifest_key":"brand-context/demo_project/manifests/v1/manifest.json"}}'::jsonb, '{"status":"completed"}'::jsonb, '{"fixture":true}'::jsonb, 'completed', now() - interval '1 day 10 minutes', now() - interval '1 day 5 minutes', 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'fixture:generation_sms_a1', encode(digest(convert_to('generation_sms_a1', 'UTF8'), 'sha256'), 'hex')),
+('generation_sms_a2', 'analysis_sms_a2', 'demo_project', 'camp_expedia_hotel_demo', 'promo_expedia_sms_near_checkin', 2, 'Generate rejected next-loop candidates.', '{"schema_version":"generation.request.v1","project_id":"demo_project","campaign_id":"camp_expedia_hotel_demo","promotion_id":"promo_expedia_sms_near_checkin","analysis_id":"analysis_sms_a2","channel":"sms","loop_count":2,"brand_context":{"context_version":"v1","manifest_key":"brand-context/demo_project/manifests/v1/manifest.json"}}'::jsonb, '{"status":"completed"}'::jsonb, '{"fixture":true}'::jsonb, 'completed', now() - interval '30 minutes', now() - interval '25 minutes', 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'fixture:generation_sms_a2', encode(digest(convert_to('generation_sms_a2', 'UTF8'), 'sha256'), 'hex'))
 ON CONFLICT (generation_id) DO UPDATE SET
     analysis_id = EXCLUDED.analysis_id,
     project_id = EXCLUDED.project_id,
@@ -634,7 +646,133 @@ ON CONFLICT (generation_id) DO UPDATE SET
     output_json = EXCLUDED.output_json,
     generation_report_json = EXCLUDED.generation_report_json,
     status = EXCLUDED.status,
+    started_at = EXCLUDED.started_at,
+    finished_at = EXCLUDED.finished_at,
+    retry_count = EXCLUDED.retry_count,
+    next_retry_at = EXCLUDED.next_retry_at,
+    last_error_code = EXCLUDED.last_error_code,
+    last_error_message = EXCLUDED.last_error_message,
+    worker_id = EXCLUDED.worker_id,
+    lease_token = EXCLUDED.lease_token,
+    heartbeat_at = EXCLUDED.heartbeat_at,
+    lease_expires_at = EXCLUDED.lease_expires_at,
+    idempotency_key = EXCLUDED.idempotency_key,
+    request_fingerprint = EXCLUDED.request_fingerprint,
     updated_at = now();
+
+-- Complete the immutable request snapshot from the confirmed target rows and
+-- versioned brand/model policies before deriving the request fingerprint.
+UPDATE generation_runs AS gr
+SET input_json = gr.input_json || jsonb_build_object(
+        'content_option_count', gr.content_option_count,
+        'operator_instruction', gr.operator_instruction,
+        'placement', jsonb_strip_nulls(jsonb_build_object(
+            'type', CASE promotion.channel
+                WHEN 'email' THEN 'email_body'
+                WHEN 'onsite_banner' THEN 'onsite_banner'
+                WHEN 'sms' THEN 'sms_message'
+            END,
+            'slot_id', CASE promotion.channel
+                WHEN 'onsite_banner' THEN 'C1_MAIN_TOP'
+            END
+        )),
+        'offer', jsonb_build_object(
+            'type', promotion.offer_type,
+            'message_brief', promotion.message_brief
+        ),
+        'landing', jsonb_build_object(
+            'url', promotion.landing_url,
+            'type', promotion.landing_type
+        ),
+        'target_segments', COALESCE(
+            (
+                SELECT jsonb_agg(
+                    jsonb_build_object(
+                        'segment_id', pts.segment_id,
+                        'content_brief', pts.content_brief_json,
+                        'data_evidence', pts.data_evidence_json
+                    )
+                    ORDER BY pts.segment_id COLLATE "C"
+                )
+                FROM promotion_target_segments AS pts
+                WHERE pts.analysis_id = gr.analysis_id
+            ),
+            '[]'::jsonb
+        ),
+        'brand_context', jsonb_build_object(
+            'context_version', 'v1',
+            'manifest_key',
+                'brand-context/demo_project/manifests/v1/manifest.json',
+            'manifest_sha256', encode(
+                digest(
+                    convert_to(
+                        'brand-context/demo_project/manifests/v1/manifest.json:fixture-v1',
+                        'UTF8'
+                    ),
+                    'sha256'
+                ),
+                'hex'
+            ),
+            'guide_version', 'v1',
+            'asset_manifest_version', 'v1',
+            'catalog_version', 'fixture-catalog-v1'
+        ),
+        'versions', jsonb_build_object(
+            'content_spec', 'generation-v1',
+            'embedding', 'text-embedding-3-large-1024-v1',
+            'guardrail', 'generation-v1',
+            'model', 'fixture-generation-model-v1',
+            'prompt', 'generation-v1',
+            'renderer', 'generation-v1',
+            'retrieval_policy', 'exact-cosine-v1'
+        )
+    ),
+    output_json = gr.output_json || jsonb_build_object(
+        'status', 'completed',
+        'retrieval_snapshot', jsonb_build_object(
+            'query_version', 'fixture-query-v1',
+            'retrieval_policy_version', 'exact-cosine-v1',
+            'embedding_version', 'text-embedding-3-large-1024-v1',
+            'documents', CASE
+                WHEN promotion.channel = 'sms' THEN jsonb_build_array(
+                    jsonb_build_object(
+                        'document_id', 'rag_demo_brand_voice_v1_0',
+                        'source_kind', 'brand_guide',
+                        'source_id', 'brand-voice',
+                        'source_version', 'v1',
+                        'distance', 0.021
+                    )
+                )
+                ELSE jsonb_build_array(
+                    jsonb_build_object(
+                        'document_id', 'rag_demo_brand_voice_v1_0',
+                        'source_kind', 'brand_guide',
+                        'source_id', 'brand-voice',
+                        'source_version', 'v1',
+                        'distance', 0.021
+                    ),
+                    jsonb_build_object(
+                        'document_id', 'rag_demo_home_hero_v1_0',
+                        'source_kind', 'brand_asset',
+                        'source_id', 'home-hero',
+                        'source_version', 'v1',
+                        'distance', 0.034
+                    )
+                )
+            END
+        )
+    ),
+    created_at = LEAST(gr.created_at, gr.started_at - interval '1 minute')
+FROM promotions AS promotion
+WHERE gr.idempotency_key LIKE 'fixture:generation_%'
+  AND promotion.promotion_id = gr.promotion_id;
+
+UPDATE generation_runs
+SET request_fingerprint = encode(
+        digest(convert_to(input_json::text, 'UTF8'), 'sha256'),
+        'hex'
+    )
+WHERE idempotency_key LIKE 'fixture:generation_%';
 
 INSERT INTO content_candidates (
     content_id,
@@ -694,6 +832,249 @@ ON CONFLICT (content_id) DO UPDATE SET
     metadata_json = EXCLUDED.metadata_json,
     status = EXCLUDED.status,
     updated_at = now();
+
+-- Generation v1 readiness is independent from the approval lifecycle above.
+-- Published fixture URLs omit CloudFront's `genai/` origin prefix while S3
+-- storage keys retain it.
+WITH generation_v1_candidate_fixture (
+    content_id,
+    image_prompt,
+    image_url,
+    creative_format,
+    image_generation_status,
+    artifact_status,
+    artifact_storage_key,
+    artifact_public_url,
+    artifact_content_type
+) AS (
+    VALUES
+    (
+        'content_email_a1_mobile',
+        'Inviting hotel stay hero with clear email copy space.',
+        'https://gen-ai.asset.dev.loop-ad.org/demo_project/promo_expedia_email_reactivation/generation_email_a1/content_email_a1_mobile/image.jpg',
+        'email_html',
+        'completed',
+        'published',
+        'genai/demo_project/promo_expedia_email_reactivation/generation_email_a1/content_email_a1_mobile/creative.email.html',
+        'https://gen-ai.asset.dev.loop-ad.org/demo_project/promo_expedia_email_reactivation/generation_email_a1/content_email_a1_mobile/creative.email.html',
+        'text/html; charset=utf-8'
+    ),
+    (
+        'content_email_a2_mobile_1',
+        'Mobile hotel offer hero with calm travel mood and copy space.',
+        'https://gen-ai.asset.dev.loop-ad.org/demo_project/promo_expedia_email_reactivation/generation_email_a2/content_email_a2_mobile_1/image.jpg',
+        'email_html',
+        'completed',
+        'published',
+        'genai/demo_project/promo_expedia_email_reactivation/generation_email_a2/content_email_a2_mobile_1/creative.email.html',
+        'https://gen-ai.asset.dev.loop-ad.org/demo_project/promo_expedia_email_reactivation/generation_email_a2/content_email_a2_mobile_1/creative.email.html',
+        'text/html; charset=utf-8'
+    ),
+    (
+        'content_email_a2_mobile_2',
+        'Hotel escape inspiration hero with destination imagery and copy space.',
+        'https://gen-ai.asset.dev.loop-ad.org/demo_project/promo_expedia_email_reactivation/generation_email_a2/content_email_a2_mobile_2/image.jpg',
+        'email_html',
+        'completed',
+        'published',
+        'genai/demo_project/promo_expedia_email_reactivation/generation_email_a2/content_email_a2_mobile_2/creative.email.html',
+        'https://gen-ai.asset.dev.loop-ad.org/demo_project/promo_expedia_email_reactivation/generation_email_a2/content_email_a2_mobile_2/creative.email.html',
+        'text/html; charset=utf-8'
+    ),
+    (
+        'content_email_a2_mobile_3',
+        'Confident hotel booking hero with bright room and copy space.',
+        'https://gen-ai.asset.dev.loop-ad.org/demo_project/promo_expedia_email_reactivation/generation_email_a2/content_email_a2_mobile_3/image.jpg',
+        'email_html',
+        'completed',
+        'published',
+        'genai/demo_project/promo_expedia_email_reactivation/generation_email_a2/content_email_a2_mobile_3/creative.email.html',
+        'https://gen-ai.asset.dev.loop-ad.org/demo_project/promo_expedia_email_reactivation/generation_email_a2/content_email_a2_mobile_3/creative.email.html',
+        'text/html; charset=utf-8'
+    ),
+    (
+        'content_onsite_a1_near',
+        'Last-minute hotel room banner with safe text area and no rendered text.',
+        'https://gen-ai.asset.dev.loop-ad.org/demo_project/promo_expedia_onsite_last_minute/generation_onsite_a1/content_onsite_a1_near/image.jpg',
+        'banner_html',
+        'completed',
+        'published',
+        'genai/demo_project/promo_expedia_onsite_last_minute/generation_onsite_a1/content_onsite_a1_near/creative.banner.html',
+        'https://gen-ai.asset.dev.loop-ad.org/demo_project/promo_expedia_onsite_last_minute/generation_onsite_a1/content_onsite_a1_near/creative.banner.html',
+        'text/html; charset=utf-8'
+    ),
+    (
+        'content_onsite_a2_near',
+        'Ready-to-book hotel banner with safe text area and no rendered text.',
+        'https://gen-ai.asset.dev.loop-ad.org/demo_project/promo_expedia_onsite_last_minute/generation_onsite_a2/content_onsite_a2_near/image.jpg',
+        'banner_html',
+        'completed',
+        'published',
+        'genai/demo_project/promo_expedia_onsite_last_minute/generation_onsite_a2/content_onsite_a2_near/creative.banner.html',
+        'https://gen-ai.asset.dev.loop-ad.org/demo_project/promo_expedia_onsite_last_minute/generation_onsite_a2/content_onsite_a2_near/creative.banner.html',
+        'text/html; charset=utf-8'
+    ),
+    ('content_sms_a1_near', NULL, NULL, 'sms_text', 'not_required', 'not_required', NULL, NULL, NULL),
+    ('content_sms_a1_family', NULL, NULL, 'sms_text', 'not_required', 'not_required', NULL, NULL, NULL),
+    ('content_sms_a2_near_1', NULL, NULL, 'sms_text', 'not_required', 'not_required', NULL, NULL, NULL),
+    ('content_sms_a2_near_2', NULL, NULL, 'sms_text', 'not_required', 'not_required', NULL, NULL, NULL)
+)
+UPDATE content_candidates AS cc
+SET image_prompt = fixture.image_prompt,
+    image_url = fixture.image_url,
+    creative_format = fixture.creative_format,
+    image_generation_status = fixture.image_generation_status,
+    artifact_status = fixture.artifact_status,
+    artifact_storage_key = fixture.artifact_storage_key,
+    artifact_public_url = fixture.artifact_public_url,
+    artifact_sha256 = CASE
+        WHEN fixture.artifact_status = 'published'
+        THEN encode(
+            digest(
+                convert_to(fixture.content_id || ':artifact:v1', 'UTF8'),
+                'sha256'
+            ),
+            'hex'
+        )
+        ELSE NULL
+    END,
+    artifact_content_type = fixture.artifact_content_type,
+    artifact_error_code = NULL,
+    artifact_published_at = CASE
+        WHEN fixture.artifact_status = 'published'
+        THEN gr.finished_at - interval '1 minute'
+        ELSE NULL
+    END,
+    metadata_json = COALESCE(cc.metadata_json, '{}'::jsonb)
+        || jsonb_build_object(
+            'creative', jsonb_build_object(
+                'model', jsonb_build_object(
+                    'provider', 'fixture',
+                    'model_version', 'fixture-generation-model-v1',
+                    'prompt_version', 'generation-v1'
+                ),
+                'lineage', jsonb_strip_nulls(jsonb_build_object(
+                    'context_version', 'v1',
+                    'retrieval_policy_version', 'exact-cosine-v1',
+                    'document_ids', CASE
+                        WHEN cc.channel = 'sms' THEN jsonb_build_array(
+                            'rag_demo_brand_voice_v1_0'
+                        )
+                        ELSE jsonb_build_array(
+                            'rag_demo_brand_voice_v1_0',
+                            'rag_demo_home_hero_v1_0'
+                        )
+                    END,
+                    'documents', CASE
+                        WHEN cc.channel = 'sms' THEN jsonb_build_array(
+                            jsonb_build_object(
+                                'document_id',
+                                    'rag_demo_brand_voice_v1_0',
+                                'source_kind', 'brand_guide',
+                                'source_id', 'brand-voice',
+                                'source_version', 'v1',
+                                'distance', 0.021
+                            )
+                        )
+                        ELSE jsonb_build_array(
+                            jsonb_build_object(
+                                'document_id',
+                                    'rag_demo_brand_voice_v1_0',
+                                'source_kind', 'brand_guide',
+                                'source_id', 'brand-voice',
+                                'source_version', 'v1',
+                                'distance', 0.021
+                            ),
+                            jsonb_build_object(
+                                'document_id',
+                                    'rag_demo_home_hero_v1_0',
+                                'source_kind', 'brand_asset',
+                                'source_id', 'home-hero',
+                                'source_version', 'v1',
+                                'distance', 0.034
+                            )
+                        )
+                    END,
+                    'selected_asset_id', CASE
+                        WHEN cc.channel IN ('email', 'onsite_banner')
+                        THEN 'home-hero'
+                    END,
+                    'provider_request_id',
+                        'fixture:provider:' || fixture.content_id
+                )),
+                'image', jsonb_strip_nulls(jsonb_build_object(
+                    'prompt', fixture.image_prompt,
+                    'storage_key', CASE
+                        WHEN fixture.image_url IS NOT NULL
+                        THEN regexp_replace(
+                            fixture.image_url,
+                            '^https://gen-ai.asset.dev.loop-ad.org/',
+                            'genai/'
+                        )
+                    END,
+                    'public_url', fixture.image_url,
+                    'sha256', CASE
+                        WHEN fixture.image_url IS NOT NULL
+                        THEN encode(
+                            digest(
+                                convert_to(
+                                    fixture.content_id || ':image:v1',
+                                    'UTF8'
+                                ),
+                                'sha256'
+                            ),
+                            'hex'
+                        )
+                    END,
+                    'width', CASE
+                        WHEN fixture.image_url IS NOT NULL THEN 1200
+                    END,
+                    'height', CASE cc.channel
+                        WHEN 'email' THEN 630
+                        WHEN 'onsite_banner' THEN 400
+                    END,
+                    'byte_size', CASE
+                        WHEN fixture.image_url IS NOT NULL THEN 2048
+                    END
+                )),
+                'artifact', jsonb_strip_nulls(jsonb_build_object(
+                    'artifact_status', fixture.artifact_status,
+                    'storage_key', fixture.artifact_storage_key,
+                    'public_url', fixture.artifact_public_url,
+                    'sha256', CASE
+                        WHEN fixture.artifact_status = 'published'
+                        THEN encode(
+                            digest(
+                                convert_to(
+                                    fixture.content_id || ':artifact:v1',
+                                    'UTF8'
+                                ),
+                                'sha256'
+                            ),
+                            'hex'
+                        )
+                    END,
+                    'content_type', fixture.artifact_content_type,
+                    'published_at', CASE
+                        WHEN fixture.artifact_status = 'published'
+                        THEN gr.finished_at - interval '1 minute'
+                    END
+                )),
+                'guardrail', jsonb_build_object(
+                    'version', 'generation-v1',
+                    'status', 'passed'
+                )
+            )
+        ),
+    created_at = LEAST(
+        cc.created_at,
+        gr.started_at + interval '1 minute'
+    ),
+    updated_at = now()
+FROM generation_v1_candidate_fixture AS fixture,
+     generation_runs AS gr
+WHERE cc.content_id = fixture.content_id
+  AND gr.generation_id = cc.generation_id;
 
 INSERT INTO promotion_runs (
     promotion_run_id,
@@ -906,5 +1287,82 @@ ON CONFLICT (promotion_run_id, user_id) DO UPDATE SET
     assignment_source = EXCLUDED.assignment_source,
     assigned_at = EXCLUDED.assigned_at,
     expires_at = EXCLUDED.expires_at;
+
+INSERT INTO generation_rag.retrieval_documents (
+    document_id,
+    project_id,
+    context_version,
+    source_kind,
+    source_id,
+    source_version,
+    chunk_index,
+    s3_key,
+    document_text,
+    metadata_json,
+    embedding,
+    embedding_model,
+    embedding_version,
+    content_sha256,
+    status
+)
+VALUES
+(
+    'rag_demo_home_hero_v1_0',
+    'demo_project',
+    'v1',
+    'brand_asset',
+    'home-hero',
+    'v1',
+    0,
+    'brand-context/demo_project/assets/home-hero/v1/original.jpg',
+    'StayLoop representative hotel hero asset.',
+    '{"role":"hero","locale":"ko-KR","active":true,"license":"fixture"}'::jsonb,
+    array_fill(0.001::real, ARRAY[1024])::vector(1024),
+    'text-embedding-3-large',
+    'text-embedding-3-large-1024-v1',
+    encode(
+        digest(convert_to('rag_demo_home_hero_v1_0', 'UTF8'), 'sha256'),
+        'hex'
+    ),
+    'active'
+),
+(
+    'rag_demo_brand_voice_v1_0',
+    'demo_project',
+    'v1',
+    'brand_guide',
+    'brand-voice',
+    'v1',
+    0,
+    'brand-context/demo_project/guidelines/brand-voice/v1/content.md',
+    'StayLoop uses calm, clear, and trustworthy travel language.',
+    '{"required":true,"channels":["email","onsite_banner","sms"]}'::jsonb,
+    array_fill(0.002::real, ARRAY[1024])::vector(1024),
+    'text-embedding-3-large',
+    'text-embedding-3-large-1024-v1',
+    encode(
+        digest(convert_to('rag_demo_brand_voice_v1_0', 'UTF8'), 'sha256'),
+        'hex'
+    ),
+    'active'
+)
+ON CONFLICT (document_id) DO UPDATE SET
+    project_id = EXCLUDED.project_id,
+    context_version = EXCLUDED.context_version,
+    source_kind = EXCLUDED.source_kind,
+    source_id = EXCLUDED.source_id,
+    source_version = EXCLUDED.source_version,
+    chunk_index = EXCLUDED.chunk_index,
+    s3_key = EXCLUDED.s3_key,
+    document_text = EXCLUDED.document_text,
+    metadata_json = EXCLUDED.metadata_json,
+    embedding = EXCLUDED.embedding,
+    embedding_model = EXCLUDED.embedding_model,
+    embedding_version = EXCLUDED.embedding_version,
+    content_sha256 = EXCLUDED.content_sha256,
+    status = EXCLUDED.status,
+    last_error_code = NULL,
+    last_error_message = NULL,
+    updated_at = now();
 
 COMMIT;

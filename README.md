@@ -21,12 +21,16 @@ LoopAd의 로컬 데이터 소스 계약을 공유하는 최소 repo입니다.
 │   └── schema.sql
 ├── postgres/
 │   ├── dummy.sql
+│   ├── expand_generation_v1.sql
+│   ├── backfill_generation_v1.sql
+│   ├── finalize_generation_v1.sql
 │   ├── expand_segment_assignment_execution_provenance.sql
 │   ├── expand_promotion_run_segment_scope.sql
 │   ├── backfill_promotion_run_segment_scope.sql
 │   ├── finalize_promotion_run_segment_scope.sql
 │   ├── tests/
 │   │   ├── repair_legacy_fixture_fallbacks.sql
+│   │   ├── verify_generation_v1.sql
 │   │   ├── verify_promotion_run_segment_scope.sql
 │   │   └── verify_segment_assignment_execution_provenance.sql
 │   └── schema.sql
@@ -411,6 +415,1469 @@ schema를 포함합니다. 검증 스크립트는 이 경우 first-parent histor
 선택합니다. 선택한 commit은 로그에 출력되며, pre-scope schema를 찾을 수
 없으면 검증을 중단합니다. GitHub Actions는 이 history를 사용할 수 있도록
 `fetch-depth: 0` checkout을 유지해야 합니다.
+
+## Generation v1 legacy migration runbook
+
+### 정리 정책
+
+Generation v1 cutover에서는 **미완성 legacy `completed` run을 `failed`로 일회성 재분류**한다. 이는 애플리케이션의 정상 상태 전이가 아니다. `completed`와 `failed`는 모두 terminal이라는 상태 계약을 유지하며, 아래 승인된 migration 절차에서만 과거의 잘못된 완료 판정을 교정한다.
+
+정리 대상은 `input_json`에 `schema_version` key가 없고 Decision dual-write cutover 시각보다 먼저 생성된 run으로 한정한다. `generation.request.v1` row, cutover 이후 row, 알 수 없는 schema version의 불일치는 정리하지 않고 rollout을 중단해 애플리케이션 결함으로 조사한다. 일반 backfill이나 finalize에 ID allowlist, cutoff 예외 또는 자동 `failed` 전환을 넣지 않는다.
+
+이미지나 HTML artifact가 없는 row에 게시 완료 값을 만들어 넣거나 strict serving view에 legacy 예외를 추가하지 않는다. `input_json`, `output_json`, `generation_report_json`, idempotency identity, candidate/artifact/approval 상태와 promotion/experiment/evaluation 이력도 수정하지 않는다. 이 정책은 미완성 광고가 serving되는 것보다 가용성을 낮추는 fail-closed 전환을 우선한다.
+
+콘텐츠가 계속 필요하면 Decision dual-write 배포 후 기존 row를 `requested`로 되돌리지 않고 **새 `generation_id`와 새 idempotency key를 가진 v1 요청**으로 재생성한다. 기존 idempotency key를 재사용하면 기존 terminal run이 반환될 수 있다. 새 run이 `completed`된 뒤 downstream 소유자가 정상 승인 흐름으로 새 promotion run/experiment/assignment를 생성하며, SQL로 기존 FK나 promotion scope/fallback provenance를 갈아끼우지 않는다.
+
+`postgres/dummy.sql`은 로컬 fixture 전용이다. shared dev, staging, production의 legacy 정리에 실행하면 안 된다.
+
+### 적용 순서
+
+아래 순서를 건너뛰지 않는다.
+
+1. 격리 container에서 `./scripts/verify_postgres_contract.sh`를 통과시킨다. 이 검증은 공유 DB에 연결하지 않는다.
+2. DB snapshot/PITR 복구 가능 여부, change ticket, maintenance window와 담당자를 확정한다. 대상 generation/candidate/downstream baseline은 보안 저장소에 export하고 manifest checksum을 ticket에 기록한다.
+3. 장기 transaction, lock 대기와 대상 table 크기를 확인한 뒤 `expand_generation_v1.sql`을 적용한다.
+4. 신규 요청·candidate가 v1 컬럼을 명시적으로 쓰고 expanded/final schema를 모두 읽을 수 있는 Decision revision을 모든 task에 배포한 뒤 이전 task를 drain한다.
+5. drain 뒤 snapshot을 격리 preflight DB로 복원한다. 실제 DB와 snapshot의 writer를 고정한 상태에서 raw fingerprint를 수집하고, 격리 DB에서 backfill을 rehearsal한 뒤 아래 finalizer-parity blocker 목록을 만든다.
+6. `LEGACY_FAILED_CANDIDATE`만 명시적 ID manifest로 만들고 전체 downstream 영향, export, checksum과 change approval을 완료한다. v1 또는 post-cutover blocker가 하나라도 있으면 중단한다.
+7. Generation/candidate, analysis target, downstream writer와 serving/dispatch traffic을 중지하고, 승인 manifest만 실제 DB에서 `failed`로 일회성 재분류한다.
+8. traffic을 재개하지 않은 채 실제 DB에 `backfill_generation_v1.sql`을 적용한다.
+9. 실제 DB에서 blocker query가 0건인지 다시 확인한 뒤 곧바로 `finalize_generation_v1.sql`을 적용한다.
+10. production용 read-only postflight와 serving smoke test를 통과한 뒤 writer/traffic을 재개한다. 필요한 콘텐츠는 정상 API로 새 v1 request를 접수한다.
+
+즉 실제 DB의 순서는 다음과 같다.
+
+```text
+expand
+→ Decision dual-write 배포 및 이전 worker drain
+→ legacy preflight/영향 확인/failed 전환
+→ backfill
+→ post-backfill preflight 0건 확인
+→ finalize
+```
+
+Cleanup commit과 finalize 성공 사이에는 Generation, candidate, promotion target 및 downstream writer와 serving/dispatch traffic을 재개하지 않는다. 기준 legacy view는 generation status gate가 없을 수 있어 finalize가 실패한 부분 배포 상태에서 `failed` row가 계속 노출될 수 있다. 이 경우 maintenance를 유지하고 원인을 해결한 뒤 finalize를 재실행한다.
+
+`postgres/tests/verify_generation_v1.sql`은 fixture를 transaction 안에서 변경하므로 운영 DB에서 실행하지 않는다. 운영에서는 이 runbook의 read-only preflight/postflight만 사용한다.
+
+세 migration은 `psql -X -v ON_ERROR_STOP=1`로 실행한다.
+
+```bash
+psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 \
+  -f postgres/expand_generation_v1.sql
+```
+
+### Dual-write 확인
+
+DB query만으로 이전 task가 종료됐음을 증명할 수 없다. 배포 control plane에서 새 revision의 desired/running task가 일치하고 이전 revision task와 in-flight 작업이 0인지 확인한다. 그 확인 시각을 immutable `dual_write_cutover_at`으로 ticket에 기록한다. 아래 두 쿼리는 cutover 이후 write가 v1 계약을 지키는지 확인하는 별도 data gate이며 모두 0건이어야 한다.
+
+```sql
+\set dual_write_cutover_at '2026-07-14 00:00:00+09'
+
+SELECT generation_id
+FROM public.generation_runs
+WHERE created_at >= :'dual_write_cutover_at'::timestamptz
+  AND (
+      idempotency_key IS NULL
+      OR request_fingerprint IS NULL
+      OR input_json ->> 'schema_version' IS DISTINCT FROM
+          'generation.request.v1'
+      OR retry_count < 0
+      OR (
+          status = 'running'
+          AND (
+              started_at IS NULL
+              OR worker_id IS NULL
+              OR lease_token IS NULL
+              OR heartbeat_at IS NULL
+              OR lease_expires_at IS NULL
+          )
+      )
+  );
+
+SELECT generation_id
+FROM public.generation_runs AS run
+WHERE run.created_at >= :'dual_write_cutover_at'::timestamptz
+  AND run.status = 'completed'
+  AND (
+      NOT EXISTS (
+          SELECT 1
+          FROM public.content_candidates AS candidate
+          WHERE candidate.generation_id = run.generation_id
+      )
+      OR EXISTS (
+          SELECT 1
+          FROM public.content_candidates AS candidate
+          WHERE candidate.generation_id = run.generation_id
+            AND (
+                (
+                    candidate.channel = 'sms'
+                    AND candidate.creative_format = 'sms_text'
+                    AND candidate.message IS NOT NULL
+                    AND candidate.image_generation_status = 'not_required'
+                    AND candidate.artifact_status = 'not_required'
+                )
+                OR (
+                    candidate.channel IN ('email', 'onsite_banner')
+                    AND candidate.creative_format = CASE candidate.channel
+                        WHEN 'email' THEN 'email_html'
+                        ELSE 'banner_html'
+                    END
+                    AND candidate.image_generation_status = 'completed'
+                    AND candidate.image_url IS NOT NULL
+                    AND candidate.artifact_status = 'published'
+                    AND candidate.artifact_storage_key IS NOT NULL
+                    AND candidate.artifact_public_url IS NOT NULL
+                    AND candidate.artifact_sha256 IS NOT NULL
+                    AND candidate.artifact_content_type IS NOT NULL
+                    AND candidate.artifact_published_at IS NOT NULL
+                )
+            ) IS NOT TRUE
+      )
+  );
+```
+
+### 격리 DB preflight
+
+실제 DB에서 cleanup 전에 backfill을 먼저 실행하지 않는다. dual-write 배포와 이전 worker drain 뒤에 snapshot을 복원한 격리 DB에서, **backfill 전에** 아래 raw fingerprint를 보안 저장소로 export한다. 이 값은 승인 manifest와 실제 전환 transaction의 optimistic gate로 사용한다.
+
+```sql
+\set dual_write_cutover_at '2026-07-14 00:00:00+09'
+SET TIME ZONE 'UTC';
+
+SELECT
+    run.generation_id,
+    run.updated_at AS expected_updated_at,
+    encode(
+        digest(to_jsonb(run)::text, 'sha256'),
+        'hex'
+    ) AS expected_run_fingerprint,
+    candidate_set.expected_candidate_fingerprint,
+    target_set.expected_target_fingerprint
+FROM public.generation_runs AS run
+CROSS JOIN LATERAL (
+    SELECT encode(
+        digest(
+            COALESCE(
+                jsonb_agg(
+                    to_jsonb(candidate)
+                    ORDER BY candidate.content_id
+                ) FILTER (WHERE candidate.content_id IS NOT NULL),
+                '[]'::jsonb
+            )::text,
+            'sha256'
+        ),
+        'hex'
+    ) AS expected_candidate_fingerprint
+    FROM public.content_candidates AS candidate
+    WHERE candidate.generation_id = run.generation_id
+) AS candidate_set
+CROSS JOIN LATERAL (
+    SELECT encode(
+        digest(
+            COALESCE(
+                jsonb_agg(
+                    to_jsonb(target)
+                    ORDER BY target.id
+                ) FILTER (WHERE target.id IS NOT NULL),
+                '[]'::jsonb
+            )::text,
+            'sha256'
+        ),
+        'hex'
+    ) AS expected_target_fingerprint
+    FROM public.promotion_target_segments AS target
+    WHERE target.analysis_id = run.analysis_id
+) AS target_set
+WHERE run.status = 'completed'
+  AND run.created_at < :'dual_write_cutover_at'::timestamptz
+  AND NOT (run.input_json ? 'schema_version')
+ORDER BY run.generation_id;
+```
+
+같은 격리 DB에서 다음 rehearsal을 수행한다.
+
+```bash
+psql "$PREFLIGHT_DATABASE_URL" -X -v ON_ERROR_STOP=1 \
+  -f postgres/expand_generation_v1.sql
+psql "$PREFLIGHT_DATABASE_URL" -X -v ON_ERROR_STOP=1 \
+  -f postgres/backfill_generation_v1.sql
+```
+
+Backfill이 `[request_identity]`, `[job_lifecycle]`, `[candidate_lifecycle]` 중 하나로 실패하면 출력된 ID부터 원인을 확인하고 실제 DB를 변경하지 않는다. Backfill이 성공하면 격리 DB에서 아래 query를 실행한다. 이 query는 finalize가 첫 오류에서 멈추는 것과 달리 네 완료 위반 범주를 모든 run에 대해 한 번에 출력한다.
+
+```sql
+\set dual_write_cutover_at '2026-07-14 00:00:00+09'
+SET TIME ZONE 'UTC';
+
+WITH completed_runs AS (
+    SELECT
+        generation_id,
+        analysis_id,
+        content_option_count,
+        input_json,
+        created_at,
+        updated_at,
+        finished_at,
+        input_json ? 'target_segments' AS has_target_snapshot,
+        COALESCE(
+            input_json ->> 'schema_version' = 'generation.request.v1',
+            false
+        ) AS requires_target_snapshot
+    FROM public.generation_runs
+    WHERE status = 'completed'
+), snapshot_damage AS (
+    SELECT run.generation_id
+    FROM completed_runs AS run
+    WHERE (
+          run.requires_target_snapshot
+          AND NOT run.has_target_snapshot
+      )
+       OR (
+          run.has_target_snapshot
+          AND (
+              jsonb_typeof(run.input_json -> 'target_segments')
+                  IS DISTINCT FROM 'array'
+              OR jsonb_array_length(
+                  CASE
+                      WHEN jsonb_typeof(
+                          run.input_json -> 'target_segments'
+                      ) = 'array'
+                      THEN run.input_json -> 'target_segments'
+                      ELSE '[]'::jsonb
+                  END
+              ) = 0
+              OR EXISTS (
+                  SELECT 1
+                  FROM jsonb_array_elements(
+                      CASE
+                          WHEN jsonb_typeof(
+                              run.input_json -> 'target_segments'
+                          ) = 'array'
+                          THEN run.input_json -> 'target_segments'
+                          ELSE '[]'::jsonb
+                      END
+                  ) AS target(value)
+                  WHERE jsonb_typeof(target.value) <> 'object'
+                     OR NULLIF(
+                         btrim(target.value ->> 'segment_id'),
+                         ''
+                     ) IS NULL
+              )
+              OR (
+                  SELECT count(*) <> count(
+                      DISTINCT btrim(target.value ->> 'segment_id')
+                  )
+                  FROM jsonb_array_elements(
+                      CASE
+                          WHEN jsonb_typeof(
+                              run.input_json -> 'target_segments'
+                          ) = 'array'
+                          THEN run.input_json -> 'target_segments'
+                          ELSE '[]'::jsonb
+                      END
+                  ) AS target(value)
+              )
+          )
+      )
+), snapshot_segments AS (
+    SELECT
+        run.generation_id,
+        btrim(target.value ->> 'segment_id') AS segment_id
+    FROM completed_runs AS run
+    CROSS JOIN LATERAL jsonb_array_elements(
+        CASE
+            WHEN jsonb_typeof(run.input_json -> 'target_segments') = 'array'
+            THEN run.input_json -> 'target_segments'
+            ELSE '[]'::jsonb
+        END
+    ) AS target(value)
+    WHERE run.has_target_snapshot
+), expected_segments AS (
+    SELECT generation_id, segment_id
+    FROM snapshot_segments
+
+    UNION
+
+    SELECT run.generation_id, target.segment_id
+    FROM completed_runs AS run
+    JOIN public.promotion_target_segments AS target
+      ON target.analysis_id = run.analysis_id
+    WHERE NOT run.has_target_snapshot
+      AND NOT run.requires_target_snapshot
+), count_damage AS (
+    SELECT run.generation_id
+    FROM completed_runs AS run
+    WHERE NOT EXISTS (
+            SELECT 1
+            FROM expected_segments AS expected
+            WHERE expected.generation_id = run.generation_id
+        )
+       OR EXISTS (
+            SELECT 1
+            FROM expected_segments AS expected
+            WHERE expected.generation_id = run.generation_id
+              AND (
+                  SELECT count(*)
+                  FROM public.content_candidates AS candidate
+                  WHERE candidate.generation_id = run.generation_id
+                    AND candidate.segment_id = expected.segment_id
+              ) <> run.content_option_count
+        )
+       OR EXISTS (
+            SELECT 1
+            FROM public.content_candidates AS candidate
+            WHERE candidate.generation_id = run.generation_id
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM expected_segments AS expected
+                  WHERE expected.generation_id = run.generation_id
+                    AND expected.segment_id = candidate.segment_id
+              )
+        )
+), readiness_damage AS (
+    SELECT run.generation_id
+    FROM completed_runs AS run
+    WHERE NOT EXISTS (
+            SELECT 1
+            FROM public.content_candidates AS candidate
+            WHERE candidate.generation_id = run.generation_id
+        )
+       OR EXISTS (
+            SELECT 1
+            FROM public.content_candidates AS candidate
+            WHERE candidate.generation_id = run.generation_id
+              AND (
+                  (
+                      candidate.channel = 'sms'
+                      AND candidate.creative_format = 'sms_text'
+                      AND candidate.message IS NOT NULL
+                      AND candidate.image_generation_status = 'not_required'
+                      AND candidate.artifact_status = 'not_required'
+                  )
+                  OR (
+                      candidate.channel IN ('email', 'onsite_banner')
+                      AND candidate.creative_format = CASE candidate.channel
+                          WHEN 'email' THEN 'email_html'
+                          ELSE 'banner_html'
+                      END
+                      AND candidate.image_generation_status = 'completed'
+                      AND candidate.image_url IS NOT NULL
+                      AND candidate.artifact_status = 'published'
+                      AND candidate.artifact_storage_key IS NOT NULL
+                      AND candidate.artifact_public_url IS NOT NULL
+                      AND candidate.artifact_sha256 IS NOT NULL
+                      AND candidate.artifact_content_type IS NOT NULL
+                      AND candidate.artifact_published_at IS NOT NULL
+                  )
+              ) IS NOT TRUE
+        )
+), timeline_damage AS (
+    SELECT DISTINCT run.generation_id
+    FROM completed_runs AS run
+    JOIN public.content_candidates AS candidate
+      USING (generation_id)
+    WHERE candidate.artifact_status = 'published'
+      AND (
+          candidate.created_at > candidate.artifact_published_at
+          OR candidate.artifact_published_at > run.finished_at
+      )
+), damage AS (
+    SELECT
+        generation_id,
+        1 AS reason_rank,
+        'completed_target_snapshot'::TEXT AS reason
+    FROM snapshot_damage
+    UNION ALL
+    SELECT generation_id, 2, 'completed_candidate_count'
+    FROM count_damage
+    UNION ALL
+    SELECT generation_id, 3, 'completed_candidate_readiness'
+    FROM readiness_damage
+    UNION ALL
+    SELECT generation_id, 4, 'completed_candidate_timeline'
+    FROM timeline_damage
+)
+SELECT
+    damage.generation_id,
+    CASE
+        WHEN run.input_json ->> 'schema_version' =
+             'generation.request.v1'
+        THEN 'STOP_V1_DEFECT'
+        WHEN run.created_at >=
+             :'dual_write_cutover_at'::timestamptz
+        THEN 'STOP_POST_CUTOVER_WRITE'
+        WHEN NOT (run.input_json ? 'schema_version')
+        THEN 'LEGACY_FAILED_CANDIDATE'
+        ELSE 'STOP_UNKNOWN_SCHEMA'
+    END AS disposition,
+    run.created_at,
+    run.updated_at AS expected_updated_at,
+    min(damage.reason_rank) AS first_reason_rank,
+    array_agg(
+        damage.reason
+        ORDER BY damage.reason_rank, damage.reason
+    ) AS reasons
+FROM damage
+JOIN completed_runs AS run USING (generation_id)
+GROUP BY
+    damage.generation_id,
+    run.input_json,
+    run.created_at,
+    run.updated_at
+ORDER BY min(damage.reason_rank), damage.generation_id;
+```
+
+`LEGACY_FAILED_CANDIDATE`만 raw fingerprint와 join해 manifest에 넣는다. 다른 disposition이 한 건이라도 있으면 rollout을 중단한다. 각 manifest row에는 ID, expected timestamp, run/candidate/promotion-target fingerprint, 전체 reason 배열을 고정한다. Transaction에서 검증할 canonical target JSON hash와 export 파일 자체의 checksum은 구분해 둘 다 승인 change ticket에 기록한다. `reason_rank`는 finalize의 검사 순서와 같으며 첫 row의 첫 reason은 `finalize_generation_v1.sql`의 첫 실패 marker와 일치해야 한다. 불일치하면 실제 DB cleanup으로 진행하지 않는다.
+
+격리 preflight DB에서 승인 target으로 아래 transaction의 downstream 집계 CTE만 먼저 실행한다. 정렬된 집계 row의 canonical JSON hash를 `expected_impact_sha256`으로 기록한 뒤 context+targets operation hash를 계산한다. Actual transaction은 두 hash를 모두 lock 안에서 재계산하므로 승인된 영향도와 달라진 row가 있으면 `COMMIT` 전에 중단된다.
+
+요구된 실제 순서가 cleanup 다음 backfill이므로 actual DB에서는 cleanup 전에 normalized finalizer query를 실행할 수 없다. 대신 동일 snapshot의 raw run/candidate/promotion-target 전체 fingerprint, 승인된 migration 파일 checksum과 writer drain을 고정한다. Transaction이 세 fingerprint를 lock 안에서 다시 계산해 exact match를 강제하므로, 격리 DB에서 결정적으로 재현한 backfill/finalizer reason과 actual 입력 사이의 차이가 있으면 전환 전에 중단된다.
+
+### Downstream 영향 확인과 `failed` 전환
+
+아래 transaction은 maintenance window에 한 세션에서 실행한다. 고정된 cutover context와 승인 manifest를 `VALUES`에 넣는다. `expected_impact_sha256`은 preflight의 canonical downstream 집계 hash이고, `manifest_sha256`은 impact hash를 포함한 context와 target row 전체를 canonical JSON으로 묶은 operation hash다. 기본 마지막 문장은 안전하게 `ROLLBACK`이다. 먼저 그대로 rehearsal하고, 같은 context/manifest로 다시 실행해 모든 gate가 통과한 경우에만 마지막 문장을 `COMMIT`으로 바꾼다.
+
+```sql
+BEGIN;
+
+SET LOCAL lock_timeout = '30s';
+SET LOCAL TIME ZONE 'UTC';
+
+-- Backfill과 같은 선행 lock 순서를 사용하고 downstream 신규 참조도 막는다.
+LOCK TABLE public.generation_runs IN SHARE ROW EXCLUSIVE MODE;
+LOCK TABLE public.content_candidates IN SHARE ROW EXCLUSIVE MODE;
+LOCK TABLE public.promotion_target_segments IN SHARE MODE;
+LOCK TABLE public.promotion_runs IN SHARE MODE;
+LOCK TABLE public.ad_experiments IN SHARE MODE;
+LOCK TABLE public.promotion_evaluations IN SHARE MODE;
+LOCK TABLE public.next_loop_preparations IN SHARE MODE;
+LOCK TABLE public.user_segment_assignments IN SHARE MODE;
+LOCK TABLE public.ad_dispatch_jobs IN SHARE MODE;
+LOCK TABLE public.redirect_links IN SHARE MODE;
+
+CREATE TEMP TABLE generation_v1_cleanup_context (
+    cutover_id TEXT PRIMARY KEY,
+    dual_write_cutover_at TIMESTAMPTZ NOT NULL,
+    cleanup_at TIMESTAMPTZ NOT NULL,
+    approval_ref TEXT NOT NULL CHECK (
+        btrim(approval_ref) <> ''
+        AND approval_ref <> 'CHG-REPLACE-ME'
+    ),
+    expected_target_count INT NOT NULL CHECK (expected_target_count > 0),
+    expected_impact_sha256 CHAR(64) NOT NULL CHECK (
+        expected_impact_sha256 ~ '^[0-9a-f]{64}$'
+    ),
+    manifest_sha256 CHAR(64) NOT NULL CHECK (
+        manifest_sha256 ~ '^[0-9a-f]{64}$'
+    ),
+    CHECK (cleanup_at >= dual_write_cutover_at)
+) ON COMMIT DROP;
+
+-- 모든 값은 승인 ticket의 고정값으로 교체한다. 재실행할 때도 바꾸지 않는다.
+INSERT INTO generation_v1_cleanup_context VALUES (
+    'generation-v1-2026-07-14',
+    '2026-07-14 00:00:00+09',
+    '2026-07-14 01:00:00+09',
+    'CHG-REPLACE-ME',
+    1,
+    repeat('0', 64),
+    repeat('0', 64)
+);
+
+CREATE TEMP TABLE generation_v1_cleanup_targets (
+    generation_id VARCHAR(100) PRIMARY KEY,
+    expected_updated_at TIMESTAMPTZ NOT NULL,
+    expected_run_fingerprint CHAR(64) NOT NULL CHECK (
+        expected_run_fingerprint ~ '^[0-9a-f]{64}$'
+    ),
+    expected_candidate_fingerprint CHAR(64) NOT NULL CHECK (
+        expected_candidate_fingerprint ~ '^[0-9a-f]{64}$'
+    ),
+    expected_target_fingerprint CHAR(64) NOT NULL CHECK (
+        expected_target_fingerprint ~ '^[0-9a-f]{64}$'
+    ),
+    expected_reasons TEXT[] NOT NULL CHECK (
+        cardinality(expected_reasons) > 0
+    )
+) ON COMMIT DROP;
+
+-- Placeholder를 승인 manifest의 실제 값으로 교체한다.
+INSERT INTO generation_v1_cleanup_targets (
+    generation_id,
+    expected_updated_at,
+    expected_run_fingerprint,
+    expected_candidate_fingerprint,
+    expected_target_fingerprint,
+    expected_reasons
+)
+VALUES
+    (
+        'replace-with-generation-id',
+        '2026-07-14 00:00:00+00',
+        repeat('0', 64),
+        repeat('0', 64),
+        repeat('0', 64),
+        ARRAY['completed_candidate_readiness']::TEXT[]
+    );
+
+DO $$
+DECLARE
+    actual_target_count BIGINT;
+    actual_manifest_sha256 TEXT;
+    expected_target_count INT;
+    expected_manifest_sha256 TEXT;
+BEGIN
+    IF (SELECT count(*) FROM generation_v1_cleanup_context) <> 1 THEN
+        RAISE EXCEPTION 'Generation cleanup context must contain one row';
+    END IF;
+
+    SELECT
+        count(*),
+        encode(
+            digest(
+                convert_to(
+                    jsonb_build_object(
+                        'context', jsonb_build_object(
+                            'cutover_id', context.cutover_id,
+                            'dual_write_cutover_at',
+                                context.dual_write_cutover_at,
+                            'cleanup_at', context.cleanup_at,
+                            'approval_ref', context.approval_ref,
+                            'expected_target_count',
+                                context.expected_target_count,
+                            'expected_impact_sha256',
+                                btrim(context.expected_impact_sha256)
+                        ),
+                        'targets', COALESCE(
+                            jsonb_agg(
+                                jsonb_build_object(
+                                    'generation_id', target.generation_id,
+                                    'expected_updated_at',
+                                        target.expected_updated_at,
+                                    'expected_run_fingerprint',
+                                        btrim(
+                                            target.expected_run_fingerprint
+                                        ),
+                                    'expected_candidate_fingerprint',
+                                        btrim(
+                                            target.expected_candidate_fingerprint
+                                        ),
+                                    'expected_target_fingerprint',
+                                        btrim(
+                                            target.expected_target_fingerprint
+                                        ),
+                                    'expected_reasons',
+                                        to_jsonb(target.expected_reasons)
+                                ) ORDER BY target.generation_id
+                            ),
+                            '[]'::jsonb
+                        )
+                    )::text,
+                    'UTF8'
+                ),
+                'sha256'
+            ),
+            'hex'
+        )
+    INTO actual_target_count, actual_manifest_sha256
+    FROM generation_v1_cleanup_targets AS target
+    CROSS JOIN generation_v1_cleanup_context AS context
+    GROUP BY
+        context.cutover_id,
+        context.dual_write_cutover_at,
+        context.cleanup_at,
+        context.approval_ref,
+        context.expected_target_count,
+        context.expected_impact_sha256;
+
+    SELECT
+        context.expected_target_count,
+        btrim(context.manifest_sha256)
+    INTO expected_target_count, expected_manifest_sha256
+    FROM generation_v1_cleanup_context AS context;
+
+    IF actual_target_count <> expected_target_count
+       OR actual_manifest_sha256 <> expected_manifest_sha256 THEN
+        RAISE EXCEPTION 'Generation cleanup manifest count/hash mismatch';
+    END IF;
+END
+$$;
+
+-- Raw snapshot이 승인 뒤 바뀌지 않았는지 확인한다. 이미 같은 cutover로
+-- 적용된 row는 already_applied로 분류되어 다시 갱신되지 않는다.
+CREATE TEMP TABLE generation_v1_cleanup_target_state
+ON COMMIT DROP
+AS
+SELECT
+    target.generation_id,
+    CASE
+        WHEN run.status = 'completed'
+         AND run.created_at < context.dual_write_cutover_at
+         AND NOT (run.input_json ? 'schema_version')
+         AND run.updated_at IS NOT DISTINCT FROM target.expected_updated_at
+         AND context.cleanup_at >= run.created_at
+         AND context.cleanup_at >= run.updated_at
+         AND (
+                run.started_at IS NULL
+                OR context.cleanup_at >= run.started_at
+             )
+         AND (
+                run.finished_at IS NULL
+                OR context.cleanup_at >= run.finished_at
+             )
+         AND encode(
+                digest(to_jsonb(run)::text, 'sha256'),
+                'hex'
+             ) = btrim(target.expected_run_fingerprint)
+         AND candidate_set.fingerprint =
+             btrim(target.expected_candidate_fingerprint)
+         AND target_set.fingerprint =
+             btrim(target.expected_target_fingerprint)
+        THEN 'pending'
+        WHEN run.status = 'failed'
+         AND run.created_at < context.dual_write_cutover_at
+         AND NOT (run.input_json ? 'schema_version')
+         AND run.last_error_code = 'LEGACY_ARTIFACT_INCOMPLETE'
+         AND run.last_error_message = format(
+                'Generation v1 legacy cleanup %s; approval=%s; manifest=%s',
+                context.cutover_id,
+                context.approval_ref,
+                btrim(context.manifest_sha256)
+             )
+         AND run.updated_at = context.cleanup_at
+        THEN 'already_applied'
+        ELSE 'invalid'
+    END AS transition_state,
+    run.created_at AS original_created_at,
+    run.started_at AS original_started_at,
+    run.finished_at AS original_finished_at,
+    run.retry_count AS original_retry_count
+FROM generation_v1_cleanup_targets AS target
+CROSS JOIN generation_v1_cleanup_context AS context
+LEFT JOIN public.generation_runs AS run USING (generation_id)
+LEFT JOIN LATERAL (
+    SELECT encode(
+        digest(
+            COALESCE(
+                jsonb_agg(
+                    to_jsonb(candidate)
+                    ORDER BY candidate.content_id
+                ) FILTER (WHERE candidate.content_id IS NOT NULL),
+                '[]'::jsonb
+            )::text,
+            'sha256'
+        ),
+        'hex'
+    ) AS fingerprint
+    FROM public.content_candidates AS candidate
+    WHERE candidate.generation_id = target.generation_id
+) AS candidate_set ON true
+LEFT JOIN LATERAL (
+    SELECT encode(
+        digest(
+            COALESCE(
+                jsonb_agg(
+                    to_jsonb(promotion_target)
+                    ORDER BY promotion_target.id
+                ) FILTER (WHERE promotion_target.id IS NOT NULL),
+                '[]'::jsonb
+            )::text,
+            'sha256'
+        ),
+        'hex'
+    ) AS fingerprint
+    FROM public.promotion_target_segments AS promotion_target
+    WHERE promotion_target.analysis_id = run.analysis_id
+) AS target_set ON true;
+
+DO $$
+DECLARE
+    invalid_generation_id public.generation_runs.generation_id%TYPE;
+BEGIN
+    SELECT generation_id
+    INTO invalid_generation_id
+    FROM generation_v1_cleanup_target_state
+    WHERE transition_state = 'invalid'
+    ORDER BY generation_id
+    LIMIT 1;
+
+    IF FOUND THEN
+        RAISE EXCEPTION
+            'Generation cleanup target changed or is not eligible: %',
+            invalid_generation_id;
+    END IF;
+
+    IF (SELECT count(*) FROM generation_v1_cleanup_target_state) < 1 THEN
+        RAISE EXCEPTION 'Generation cleanup manifest is empty';
+    END IF;
+END
+$$;
+
+-- 각 relation을 독립 집계해 one-to-many join의 count 증폭을 피한다.
+CREATE TEMP TABLE generation_v1_cleanup_impact
+ON COMMIT DROP
+AS
+WITH targets AS MATERIALIZED (
+    SELECT generation_id
+    FROM generation_v1_cleanup_targets
+), impacted_runs AS MATERIALIZED (
+    SELECT
+        target.generation_id AS target_generation_id,
+        run.promotion_run_id,
+        run.status
+    FROM targets AS target
+    JOIN public.promotion_runs AS run
+      ON run.generation_id = target.generation_id
+), impacted_candidates AS MATERIALIZED (
+    SELECT
+        target.generation_id AS target_generation_id,
+        candidate.content_id
+    FROM targets AS target
+    JOIN public.content_candidates AS candidate
+      ON candidate.generation_id = target.generation_id
+), impacted_experiment_ids AS MATERIALIZED (
+    SELECT
+        target.generation_id AS target_generation_id,
+        experiment.ad_experiment_id
+    FROM targets AS target
+    JOIN public.ad_experiments AS experiment
+      ON experiment.generation_id = target.generation_id
+
+    UNION
+
+    SELECT
+        run.target_generation_id,
+        experiment.ad_experiment_id
+    FROM impacted_runs AS run
+    JOIN public.ad_experiments AS experiment
+      ON experiment.promotion_run_id = run.promotion_run_id
+), impacted_experiments AS MATERIALIZED (
+    SELECT
+        edge.target_generation_id,
+        experiment.ad_experiment_id,
+        experiment.status
+    FROM impacted_experiment_ids AS edge
+    JOIN public.ad_experiments AS experiment
+      ON experiment.ad_experiment_id = edge.ad_experiment_id
+), impact AS (
+    SELECT
+        target_generation_id,
+        'promotion_runs'::TEXT AS relation_name,
+        status::TEXT AS impact_state,
+        count(*)::BIGINT AS row_count
+    FROM impacted_runs
+    GROUP BY target_generation_id, status
+
+    UNION ALL
+
+    SELECT target_generation_id, 'ad_experiments', status, count(*)
+    FROM impacted_experiments
+    GROUP BY target_generation_id, status
+
+    UNION ALL
+
+    SELECT
+        target.generation_id,
+        'next_loop_preparations',
+        preparation.status,
+        count(*)
+    FROM targets AS target
+    JOIN public.next_loop_preparations AS preparation
+      ON preparation.generation_id = target.generation_id
+      OR preparation.source_promotion_run_id IN (
+            SELECT run.promotion_run_id
+            FROM impacted_runs AS run
+            WHERE run.target_generation_id = target.generation_id
+         )
+      OR preparation.activated_promotion_run_id IN (
+            SELECT run.promotion_run_id
+            FROM impacted_runs AS run
+            WHERE run.target_generation_id = target.generation_id
+         )
+    GROUP BY target.generation_id, preparation.status
+
+    UNION ALL
+
+    SELECT
+        target.generation_id,
+        'promotion_evaluations',
+        evaluation.status || CASE
+            WHEN evaluation.next_loop_required
+            THEN ':next_loop_required'
+            ELSE ''
+        END,
+        count(*)
+    FROM targets AS target
+    JOIN public.promotion_evaluations AS evaluation
+      ON evaluation.promotion_run_id IN (
+            SELECT run.promotion_run_id
+            FROM impacted_runs AS run
+            WHERE run.target_generation_id = target.generation_id
+         )
+      OR evaluation.ad_experiment_id IN (
+            SELECT experiment.ad_experiment_id
+            FROM impacted_experiments AS experiment
+            WHERE experiment.target_generation_id = target.generation_id
+         )
+      OR evaluation.content_id IN (
+            SELECT candidate.content_id
+            FROM impacted_candidates AS candidate
+            WHERE candidate.target_generation_id = target.generation_id
+         )
+    GROUP BY
+        target.generation_id,
+        evaluation.status,
+        evaluation.next_loop_required
+
+    UNION ALL
+
+    SELECT
+        target.generation_id,
+        'user_segment_assignments',
+        CASE
+            WHEN assignment.expires_at IS NULL
+              OR assignment.expires_at > now()
+            THEN 'active'
+            ELSE 'expired'
+        END || CASE
+            WHEN assignment.fallback THEN ':fallback'
+            ELSE ':direct'
+        END,
+        count(*)
+    FROM targets AS target
+    JOIN public.user_segment_assignments AS assignment
+      ON assignment.promotion_run_id IN (
+            SELECT run.promotion_run_id
+            FROM impacted_runs AS run
+            WHERE run.target_generation_id = target.generation_id
+         )
+      OR assignment.ad_experiment_id IN (
+            SELECT experiment.ad_experiment_id
+            FROM impacted_experiments AS experiment
+            WHERE experiment.target_generation_id = target.generation_id
+         )
+      OR assignment.content_id IN (
+            SELECT candidate.content_id
+            FROM impacted_candidates AS candidate
+            WHERE candidate.target_generation_id = target.generation_id
+         )
+    GROUP BY
+        target.generation_id,
+        (assignment.expires_at IS NULL OR assignment.expires_at > now()),
+        assignment.fallback
+
+    UNION ALL
+
+    SELECT
+        target.generation_id,
+        'ad_dispatch_jobs',
+        dispatch.status,
+        count(*)
+    FROM targets AS target
+    JOIN public.ad_dispatch_jobs AS dispatch
+      ON dispatch.promotion_run_id IN (
+            SELECT run.promotion_run_id
+            FROM impacted_runs AS run
+            WHERE run.target_generation_id = target.generation_id
+         )
+      OR dispatch.ad_experiment_id IN (
+            SELECT experiment.ad_experiment_id
+            FROM impacted_experiments AS experiment
+            WHERE experiment.target_generation_id = target.generation_id
+         )
+    GROUP BY target.generation_id, dispatch.status
+
+    UNION ALL
+
+    SELECT
+        target.generation_id,
+        'redirect_links',
+        CASE
+            WHEN redirect.expires_at IS NULL OR redirect.expires_at > now()
+            THEN 'active'
+            ELSE 'expired'
+        END,
+        count(*)
+    FROM targets AS target
+    JOIN public.redirect_links AS redirect
+      ON redirect.promotion_run_id IN (
+            SELECT run.promotion_run_id
+            FROM impacted_runs AS run
+            WHERE run.target_generation_id = target.generation_id
+         )
+      OR redirect.ad_experiment_id IN (
+            SELECT experiment.ad_experiment_id
+            FROM impacted_experiments AS experiment
+            WHERE experiment.target_generation_id = target.generation_id
+         )
+      OR redirect.content_id IN (
+            SELECT candidate.content_id
+            FROM impacted_candidates AS candidate
+            WHERE candidate.target_generation_id = target.generation_id
+         )
+    GROUP BY
+        target.generation_id,
+        (redirect.expires_at IS NULL OR redirect.expires_at > now())
+
+    UNION ALL
+
+    SELECT
+        candidate.target_generation_id,
+        'active_ad_serving_assignments',
+        CASE
+            WHEN serving.fallback THEN 'exposed:fallback'
+            ELSE 'exposed:direct'
+        END,
+        count(*)
+    FROM impacted_candidates AS candidate
+    JOIN public.active_ad_serving_assignments AS serving
+      ON serving.content_id = candidate.content_id
+    GROUP BY candidate.target_generation_id, serving.fallback
+)
+SELECT
+    target.generation_id,
+    impact.relation_name,
+    impact.impact_state,
+    impact.row_count
+FROM targets AS target
+LEFT JOIN impact
+  ON impact.target_generation_id = target.generation_id
+ORDER BY
+    target.generation_id,
+    impact.relation_name,
+    impact.impact_state;
+
+SELECT
+    generation_id,
+    relation_name,
+    impact_state,
+    row_count
+FROM generation_v1_cleanup_impact
+ORDER BY generation_id, relation_name, impact_state;
+
+DO $$
+DECLARE
+    actual_impact_sha256 TEXT;
+    expected_impact_sha256 TEXT;
+BEGIN
+    SELECT encode(
+        digest(
+            convert_to(
+                COALESCE(
+                    jsonb_agg(
+                        jsonb_build_object(
+                            'generation_id', impact.generation_id,
+                            'relation_name', impact.relation_name,
+                            'impact_state', impact.impact_state,
+                            'row_count', impact.row_count
+                        ) ORDER BY
+                            impact.generation_id,
+                            impact.relation_name,
+                            impact.impact_state
+                    ),
+                    '[]'::jsonb
+                )::text,
+                'UTF8'
+            ),
+            'sha256'
+        ),
+        'hex'
+    )
+    INTO actual_impact_sha256
+    FROM generation_v1_cleanup_impact AS impact;
+
+    SELECT btrim(context.expected_impact_sha256)
+    INTO expected_impact_sha256
+    FROM generation_v1_cleanup_context AS context;
+
+    IF actual_impact_sha256 <> expected_impact_sha256 THEN
+        RAISE EXCEPTION 'Generation cleanup downstream impact hash mismatch';
+    END IF;
+END
+$$;
+
+-- 활성 downstream이 있으면 SQL로 고치지 않는다. 소유 애플리케이션의 정상
+-- pause/cancel/expire/replacement 흐름을 완료한 뒤 새 snapshot으로 다시 승인한다.
+DO $$
+BEGIN
+    IF EXISTS (
+        WITH targets AS MATERIALIZED (
+            SELECT generation_id
+            FROM generation_v1_cleanup_targets
+        ), impacted_runs AS MATERIALIZED (
+            SELECT
+                target.generation_id AS target_generation_id,
+                run.promotion_run_id,
+                run.status
+            FROM targets AS target
+            JOIN public.promotion_runs AS run
+              ON run.generation_id = target.generation_id
+        ), impacted_candidates AS MATERIALIZED (
+            SELECT
+                target.generation_id AS target_generation_id,
+                candidate.content_id
+            FROM targets AS target
+            JOIN public.content_candidates AS candidate
+              ON candidate.generation_id = target.generation_id
+        ), impacted_experiment_ids AS MATERIALIZED (
+            SELECT
+                target.generation_id AS target_generation_id,
+                experiment.ad_experiment_id
+            FROM targets AS target
+            JOIN public.ad_experiments AS experiment
+              ON experiment.generation_id = target.generation_id
+
+            UNION
+
+            SELECT
+                run.target_generation_id,
+                experiment.ad_experiment_id
+            FROM impacted_runs AS run
+            JOIN public.ad_experiments AS experiment
+              ON experiment.promotion_run_id = run.promotion_run_id
+        ), impacted_experiments AS MATERIALIZED (
+            SELECT
+                edge.target_generation_id,
+                experiment.ad_experiment_id,
+                experiment.status
+            FROM impacted_experiment_ids AS edge
+            JOIN public.ad_experiments AS experiment
+              ON experiment.ad_experiment_id = edge.ad_experiment_id
+        )
+        SELECT 1
+        FROM impacted_runs
+        WHERE status IN ('planned', 'approved', 'running', 'evaluating')
+
+        UNION ALL
+
+        SELECT 1
+        FROM impacted_experiments
+        WHERE status IN ('planned', 'approved', 'running', 'evaluating')
+
+        UNION ALL
+
+        SELECT 1
+        FROM targets AS target
+        JOIN public.next_loop_preparations AS preparation
+          ON preparation.generation_id = target.generation_id
+          OR preparation.source_promotion_run_id IN (
+                SELECT run.promotion_run_id
+                FROM impacted_runs AS run
+                WHERE run.target_generation_id = target.generation_id
+             )
+          OR preparation.activated_promotion_run_id IN (
+                SELECT run.promotion_run_id
+                FROM impacted_runs AS run
+                WHERE run.target_generation_id = target.generation_id
+             )
+        WHERE preparation.status IN ('awaiting_content_approval', 'activated')
+
+        UNION ALL
+
+        SELECT 1
+        FROM targets AS target
+        JOIN public.user_segment_assignments AS assignment
+          ON assignment.promotion_run_id IN (
+                SELECT run.promotion_run_id
+                FROM impacted_runs AS run
+                WHERE run.target_generation_id = target.generation_id
+             )
+          OR assignment.ad_experiment_id IN (
+                SELECT experiment.ad_experiment_id
+                FROM impacted_experiments AS experiment
+                WHERE experiment.target_generation_id = target.generation_id
+             )
+          OR assignment.content_id IN (
+                SELECT candidate.content_id
+                FROM impacted_candidates AS candidate
+                WHERE candidate.target_generation_id = target.generation_id
+             )
+        WHERE assignment.expires_at IS NULL
+           OR assignment.expires_at > now()
+
+        UNION ALL
+
+        SELECT 1
+        FROM targets AS target
+        JOIN public.ad_dispatch_jobs AS dispatch
+          ON dispatch.promotion_run_id IN (
+                SELECT run.promotion_run_id
+                FROM impacted_runs AS run
+                WHERE run.target_generation_id = target.generation_id
+             )
+          OR dispatch.ad_experiment_id IN (
+                SELECT experiment.ad_experiment_id
+                FROM impacted_experiments AS experiment
+                WHERE experiment.target_generation_id = target.generation_id
+             )
+        WHERE dispatch.status IN ('queued', 'scheduled', 'running')
+
+        UNION ALL
+
+        SELECT 1
+        FROM targets AS target
+        JOIN public.redirect_links AS redirect
+          ON redirect.promotion_run_id IN (
+                SELECT run.promotion_run_id
+                FROM impacted_runs AS run
+                WHERE run.target_generation_id = target.generation_id
+             )
+          OR redirect.ad_experiment_id IN (
+                SELECT experiment.ad_experiment_id
+                FROM impacted_experiments AS experiment
+                WHERE experiment.target_generation_id = target.generation_id
+             )
+          OR redirect.content_id IN (
+                SELECT candidate.content_id
+                FROM impacted_candidates AS candidate
+                WHERE candidate.target_generation_id = target.generation_id
+             )
+        WHERE redirect.expires_at IS NULL OR redirect.expires_at > now()
+
+        UNION ALL
+
+        SELECT 1
+        FROM impacted_candidates AS candidate
+        JOIN public.active_ad_serving_assignments AS serving
+          ON serving.content_id = candidate.content_id
+
+        LIMIT 1
+    ) THEN
+        RAISE EXCEPTION
+            'Generation cleanup blocked by active downstream state';
+    END IF;
+END
+$$;
+
+CREATE TEMP TABLE generation_v1_cleanup_applied
+ON COMMIT DROP
+AS
+WITH updated AS (
+    UPDATE public.generation_runs AS run
+    SET status = 'failed',
+    started_at = COALESCE(run.started_at, run.created_at),
+    finished_at = CASE
+        WHEN run.finished_at IS NULL
+          OR run.finished_at < COALESCE(run.started_at, run.created_at)
+        THEN GREATEST(
+            COALESCE(run.started_at, run.created_at),
+            run.updated_at
+        )
+        ELSE run.finished_at
+    END,
+    next_retry_at = NULL,
+    last_error_code = 'LEGACY_ARTIFACT_INCOMPLETE',
+    last_error_message = format(
+        'Generation v1 legacy cleanup %s; approval=%s; manifest=%s',
+        context.cutover_id,
+        context.approval_ref,
+        btrim(context.manifest_sha256)
+    ),
+    worker_id = NULL,
+    lease_token = NULL,
+    heartbeat_at = NULL,
+    lease_expires_at = NULL,
+    updated_at = context.cleanup_at
+    FROM generation_v1_cleanup_target_state AS state
+    CROSS JOIN generation_v1_cleanup_context AS context
+    WHERE run.generation_id = state.generation_id
+      AND state.transition_state = 'pending'
+    RETURNING run.generation_id
+)
+SELECT generation_id FROM updated;
+
+DO $$
+DECLARE
+    pending_count BIGINT;
+    already_applied_count BIGINT;
+    applied_count BIGINT;
+BEGIN
+    SELECT count(*) FILTER (WHERE transition_state = 'pending'),
+           count(*) FILTER (WHERE transition_state = 'already_applied')
+    INTO pending_count, already_applied_count
+    FROM generation_v1_cleanup_target_state;
+
+    SELECT count(*) INTO applied_count
+    FROM generation_v1_cleanup_applied;
+
+    IF applied_count <> pending_count
+       OR pending_count + already_applied_count < 1
+       OR pending_count + already_applied_count <>
+          (SELECT count(*) FROM generation_v1_cleanup_targets) THEN
+        RAISE EXCEPTION 'Generation cleanup transition count mismatch';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM generation_v1_cleanup_target_state AS state
+        JOIN public.generation_runs AS run USING (generation_id)
+        CROSS JOIN generation_v1_cleanup_context AS context
+        WHERE run.status <> 'failed'
+           OR run.last_error_code <> 'LEGACY_ARTIFACT_INCOMPLETE'
+           OR run.last_error_message <> format(
+                'Generation v1 legacy cleanup %s; approval=%s; manifest=%s',
+                context.cutover_id,
+                context.approval_ref,
+                btrim(context.manifest_sha256)
+              )
+           OR run.updated_at <> context.cleanup_at
+           OR run.started_at IS NULL
+           OR run.finished_at IS NULL
+           OR run.finished_at < run.started_at
+           OR run.next_retry_at IS NOT NULL
+           OR run.worker_id IS NOT NULL
+           OR run.lease_token IS NOT NULL
+           OR run.heartbeat_at IS NOT NULL
+           OR run.lease_expires_at IS NOT NULL
+           OR run.retry_count IS DISTINCT FROM state.original_retry_count
+           OR (
+                state.transition_state = 'pending'
+                AND state.original_finished_at IS NOT NULL
+                AND state.original_finished_at >= COALESCE(
+                    state.original_started_at,
+                    state.original_created_at
+                )
+                AND run.finished_at IS DISTINCT FROM
+                    state.original_finished_at
+           )
+    ) THEN
+        RAISE EXCEPTION 'Generation cleanup postcondition failed';
+    END IF;
+END
+$$;
+
+ROLLBACK;
+```
+
+위 SQL은 `generation_runs`의 상태/lifecycle/error 필드만 바꾼다. retry count, request identity, 세 JSON payload, candidate/artifact/approval 및 downstream row는 그대로 둔다. 따라서 과거 `output_json.status` 값이 남을 수 있지만 serving/작업 상태의 authoritative 값은 `generation_runs.status`이며 payload는 당시 결과의 감사 기록으로 취급한다. 유효한 기존 `finished_at`도 보존하고 교정 시각은 고정 `cleanup_at`과 외부 ticket/export에 남긴다. 동일한 cutover context와 manifest로 재실행하면 `already_applied`만 남아 추가 update 없이 성공한다.
+
+승인된 실제 전환에서는 전체 block을 처음부터 다시 실행하고 마지막 `ROLLBACK;`만 `COMMIT;`으로 바꾼다. Finalize 후 strict serving view는 `generation_runs.status = 'completed'`만 허용하므로 이 run의 assignment는 노출되지 않는다.
+
+### Backfill, finalize, rollback 기준
+
+실제 DB cleanup이 commit된 뒤에만 다음을 실행한다.
+
+```bash
+psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 \
+  -f postgres/backfill_generation_v1.sql
+psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 \
+  -f postgres/finalize_generation_v1.sql
+```
+
+Backfill 뒤에는 격리 DB에서 사용한 blocker query를 실제 DB에서 다시 실행해 반드시 0건을 확인한다. Finalize가 `[completed_target_snapshot]`, `[completed_candidate_count]`, `[completed_candidate_readiness]`, `[completed_candidate_timeline]` 또는 constraint validation 오류로 실패하면 transaction 전체가 rollback된다. 원인 row를 정리한 뒤 finalize를 다시 실행한다.
+
+#### Production read-only postflight
+
+먼저 finalizer-parity blocker query와 dual-write data gate를 실제 DB에서 다시 실행해 모두 0건인지 확인한다. 이어 승인 manifest ID와 고정 context를 아래 `VALUES`/변수에 넣고 read-only postflight를 실행한다.
+
+```sql
+\set cutover_id 'generation-v1-2026-07-14'
+\set approval_ref 'CHG-REPLACE-ME'
+\set manifest_sha256 'replace-with-approved-operation-sha256'
+\set cleanup_at '2026-07-14 01:00:00+09'
+
+WITH targets(generation_id) AS MATERIALIZED (
+    VALUES ('replace-with-generation-id'::VARCHAR(100))
+), impacted_runs AS MATERIALIZED (
+    SELECT
+        target.generation_id AS target_generation_id,
+        run.promotion_run_id,
+        run.status
+    FROM targets AS target
+    JOIN public.promotion_runs AS run USING (generation_id)
+), impacted_candidates AS MATERIALIZED (
+    SELECT
+        target.generation_id AS target_generation_id,
+        candidate.content_id
+    FROM targets AS target
+    JOIN public.content_candidates AS candidate USING (generation_id)
+), impacted_experiment_ids AS MATERIALIZED (
+    SELECT
+        target.generation_id AS target_generation_id,
+        experiment.ad_experiment_id
+    FROM targets AS target
+    JOIN public.ad_experiments AS experiment USING (generation_id)
+
+    UNION
+
+    SELECT
+        run.target_generation_id,
+        experiment.ad_experiment_id
+    FROM impacted_runs AS run
+    JOIN public.ad_experiments AS experiment USING (promotion_run_id)
+), impacted_experiments AS MATERIALIZED (
+    SELECT
+        edge.target_generation_id,
+        experiment.ad_experiment_id,
+        experiment.status
+    FROM impacted_experiment_ids AS edge
+    JOIN public.ad_experiments AS experiment USING (ad_experiment_id)
+)
+SELECT
+    target.generation_id,
+    run.status = 'failed'
+      AND run.last_error_code = 'LEGACY_ARTIFACT_INCOMPLETE'
+      AND run.last_error_message = format(
+            'Generation v1 legacy cleanup %s; approval=%s; manifest=%s',
+            :'cutover_id',
+            :'approval_ref',
+            :'manifest_sha256'
+          )
+      AND run.updated_at = :'cleanup_at'::timestamptz
+      AND run.started_at IS NOT NULL
+      AND run.finished_at >= run.started_at
+      AND run.next_retry_at IS NULL
+      AND run.worker_id IS NULL
+      AND run.lease_token IS NULL
+      AND run.heartbeat_at IS NULL
+      AND run.lease_expires_at IS NULL
+        AS status_contract_ok,
+    (SELECT count(*)
+     FROM impacted_runs AS item
+     WHERE item.target_generation_id = target.generation_id
+       AND item.status IN ('planned', 'approved', 'running', 'evaluating'))
+        AS active_promotion_run_count,
+    (SELECT count(*)
+     FROM impacted_experiments AS item
+     WHERE item.target_generation_id = target.generation_id
+       AND item.status IN ('planned', 'approved', 'running', 'evaluating'))
+        AS active_experiment_count,
+    (SELECT count(*)
+     FROM public.next_loop_preparations AS preparation
+     WHERE preparation.status IN ('awaiting_content_approval', 'activated')
+       AND (
+            preparation.generation_id = target.generation_id
+            OR preparation.source_promotion_run_id IN (
+                SELECT item.promotion_run_id
+                FROM impacted_runs AS item
+                WHERE item.target_generation_id = target.generation_id
+            )
+            OR preparation.activated_promotion_run_id IN (
+                SELECT item.promotion_run_id
+                FROM impacted_runs AS item
+                WHERE item.target_generation_id = target.generation_id
+            )
+       )) AS active_next_loop_count,
+    (SELECT count(*)
+     FROM public.user_segment_assignments AS assignment
+     WHERE (assignment.expires_at IS NULL OR assignment.expires_at > now())
+       AND (
+            assignment.promotion_run_id IN (
+                SELECT item.promotion_run_id
+                FROM impacted_runs AS item
+                WHERE item.target_generation_id = target.generation_id
+            )
+            OR assignment.ad_experiment_id IN (
+                SELECT item.ad_experiment_id
+                FROM impacted_experiments AS item
+                WHERE item.target_generation_id = target.generation_id
+            )
+            OR assignment.content_id IN (
+                SELECT item.content_id
+                FROM impacted_candidates AS item
+                WHERE item.target_generation_id = target.generation_id
+            )
+       )) AS active_assignment_count,
+    (SELECT count(*)
+     FROM public.ad_dispatch_jobs AS dispatch
+     WHERE dispatch.status IN ('queued', 'scheduled', 'running')
+       AND (
+            dispatch.promotion_run_id IN (
+                SELECT item.promotion_run_id
+                FROM impacted_runs AS item
+                WHERE item.target_generation_id = target.generation_id
+            )
+            OR dispatch.ad_experiment_id IN (
+                SELECT item.ad_experiment_id
+                FROM impacted_experiments AS item
+                WHERE item.target_generation_id = target.generation_id
+            )
+       )) AS active_dispatch_job_count,
+    (SELECT count(*)
+     FROM public.redirect_links AS redirect
+     WHERE (redirect.expires_at IS NULL OR redirect.expires_at > now())
+       AND (
+            redirect.promotion_run_id IN (
+                SELECT item.promotion_run_id
+                FROM impacted_runs AS item
+                WHERE item.target_generation_id = target.generation_id
+            )
+            OR redirect.ad_experiment_id IN (
+                SELECT item.ad_experiment_id
+                FROM impacted_experiments AS item
+                WHERE item.target_generation_id = target.generation_id
+            )
+            OR redirect.content_id IN (
+                SELECT item.content_id
+                FROM impacted_candidates AS item
+                WHERE item.target_generation_id = target.generation_id
+            )
+       )) AS active_redirect_count,
+    (SELECT count(*)
+     FROM impacted_candidates AS candidate
+     JOIN public.active_ad_serving_assignments AS serving
+       ON serving.content_id = candidate.content_id
+     WHERE candidate.target_generation_id = target.generation_id)
+        AS serving_row_count
+FROM targets AS target
+LEFT JOIN public.generation_runs AS run USING (generation_id)
+ORDER BY target.generation_id;
+
+SELECT conrelid::regclass AS relation_name, conname
+FROM pg_constraint
+WHERE conrelid IN (
+        'public.generation_runs'::regclass,
+        'public.content_candidates'::regclass,
+        'generation_rag.retrieval_documents'::regclass
+      )
+  AND NOT convalidated
+ORDER BY conrelid::regclass::TEXT, conname;
+```
+
+결과 row 수는 승인 manifest target 수와 같아야 하고 `status_contract_ok`는 모두 `true`, 모든 `*_count`는 0이어야 한다. 미검증 constraint query도 0건이어야 한다. Preflight export와 비교해 cleanup 대상 밖의 promotion scope fingerprint, fallback flag/reason/source 및 historical evaluation provenance가 그대로인지 확인하고, 정상 non-target 광고의 serving smoke test까지 통과한 뒤에만 traffic을 재개한다.
+
+- Expand 실패: transaction rollback 후 같은 파일을 재실행한다.
+- Cleanup gate/count/update 오류: transaction 전체를 `ROLLBACK`한다. Snapshot과 fingerprint가 달라졌다면 기존 manifest를 수정하지 말고 새 snapshot/export/approval로 다시 시작한다.
+- Cleanup `COMMIT` 후: 해당 run을 `completed`로 되돌리거나 legacy allowlist를 추가하거나 strict view를 완화하지 않는다. 재생성이 필요하면 새 ID의 v1 요청을 만든다.
+- Backfill/finalize 실패: 각 migration transaction의 rollback을 확인하고, cleanup으로 이미 재분류된 `failed` row는 유지한다. Writer/serving/dispatch maintenance도 유지한 채 원인을 해결하고 같은 단계를 재실행한다.
+- Snapshot/PITR 복원은 개별 status 재분류의 rollback 수단이 아니라 Generation v1 rollout 전체의 재해 복구 절차다. Cleanup 이후 write가 없는지 확인하고 별도 복구 승인을 받은 경우에만 수행한다.
+
+### Commit 누락 방지 체크리스트
+
+Generation v1 변경 commit에는 다음 8개 파일이 모두 포함되어야 한다.
+
+```text
+README.md
+postgres/schema.sql
+postgres/dummy.sql
+postgres/expand_generation_v1.sql
+postgres/backfill_generation_v1.sql
+postgres/finalize_generation_v1.sql
+postgres/tests/verify_generation_v1.sql
+scripts/verify_postgres_contract.sh
+```
+
+커밋 준비 전에 파일 존재 여부와 working tree를 확인한다.
+
+```bash
+for file in \
+  README.md \
+  postgres/schema.sql \
+  postgres/dummy.sql \
+  postgres/expand_generation_v1.sql \
+  postgres/backfill_generation_v1.sql \
+  postgres/finalize_generation_v1.sql \
+  postgres/tests/verify_generation_v1.sql \
+  scripts/verify_postgres_contract.sh; do
+  test -f "$file" || exit 1
+done
+
+git status --short
+./scripts/verify_postgres_contract.sh
+```
+
+실제 commit을 만드는 사람이 staging한 뒤에는 `git diff --cached --name-only` 결과를 위 목록과 대조하고, 신규 SQL이 `??`로 남아 있지 않은지 확인한다. 이 runbook 작성 작업에서는 로컬 전용 요청에 따라 staging, commit, push를 수행하지 않는다.
 
 ## Docker Compose
 
