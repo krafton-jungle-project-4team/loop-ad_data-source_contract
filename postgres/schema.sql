@@ -1,5 +1,5 @@
 -- =========================================================
--- Loop-Ad PostgreSQL Schema Contract v1.6
+-- Loop-Ad PostgreSQL Schema Contract v1.7
 -- Draft: promotion segment suggestion / confirmation flow
 -- Owner: loop-ad_data-source_contract
 -- Domain: hotel / accommodation booking
@@ -17,6 +17,35 @@
 -- =========================================================
 
 BEGIN;
+
+CREATE EXTENSION IF NOT EXISTS vector;
+
+DO $$
+DECLARE
+    vector_extversion TEXT;
+    vector_version_parts INT[];
+BEGIN
+    SELECT extversion
+    INTO vector_extversion
+    FROM pg_extension
+    WHERE extname = 'vector';
+
+    IF vector_extversion IS NULL THEN
+        RAISE EXCEPTION 'pgvector extension is required';
+    END IF;
+
+    vector_version_parts := string_to_array(
+        regexp_replace(vector_extversion, '[^0-9.].*$', ''),
+        '.'
+    )::INT[];
+
+    IF vector_version_parts < ARRAY[0, 8, 0] THEN
+        RAISE EXCEPTION
+            'pgvector >= 0.8.0 is required, found %',
+            vector_extversion;
+    END IF;
+END
+$$;
 
 -- =========================================================
 -- 0. Projects
@@ -37,6 +66,81 @@ CREATE TABLE IF NOT EXISTS projects (
 
 CREATE INDEX IF NOT EXISTS idx_projects_status
 ON projects (status);
+
+-- =========================================================
+-- 0A. User Behavior Vector Search Generations
+-- Frozen PostgreSQL search copies of ClickHouse behavior vectors.
+-- =========================================================
+CREATE TABLE IF NOT EXISTS user_behavior_vector_search_generations (
+    vector_generation_id VARCHAR(100) PRIMARY KEY,
+    project_id VARCHAR(100) NOT NULL,
+    vector_version VARCHAR(50) NOT NULL,
+    manifest_hash VARCHAR(128) NOT NULL,
+    window_start TIMESTAMPTZ NOT NULL,
+    window_end TIMESTAMPTZ NOT NULL,
+    source_revision_cutoff TIMESTAMPTZ NOT NULL,
+    expected_user_count INT NOT NULL,
+    synced_user_count INT NOT NULL DEFAULT 0,
+    invalid_user_count INT NOT NULL DEFAULT 0,
+    last_user_id VARCHAR(255),
+    status VARCHAR(50) NOT NULL DEFAULT 'in_progress',
+    is_active BOOLEAN NOT NULL DEFAULT false,
+    failure_reason TEXT,
+    activated_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT fk_user_behavior_vector_search_generations_project
+        FOREIGN KEY (project_id) REFERENCES projects (project_id),
+
+    CONSTRAINT chk_user_behavior_vector_search_generations_expected_count
+        CHECK (expected_user_count >= 0),
+
+    CONSTRAINT chk_user_behavior_vector_search_generations_synced_count
+        CHECK (synced_user_count >= 0),
+
+    CONSTRAINT chk_user_behavior_vector_search_generations_invalid_count
+        CHECK (invalid_user_count >= 0),
+
+    CONSTRAINT chk_user_behavior_vector_search_generations_status
+        CHECK (status IN ('in_progress', 'activated', 'superseded', 'failed'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_user_behavior_vector_search_generations_active
+ON user_behavior_vector_search_generations (project_id, vector_version)
+WHERE is_active = true;
+
+CREATE TABLE IF NOT EXISTS user_behavior_vector_search (
+    vector_generation_id VARCHAR(100) NOT NULL,
+    project_id VARCHAR(100) NOT NULL,
+    user_id VARCHAR(255) NOT NULL,
+    vector_version VARCHAR(50) NOT NULL,
+    vector_dim INT NOT NULL DEFAULT 64,
+    embedding vector(64) NOT NULL,
+    window_start TIMESTAMPTZ NOT NULL,
+    window_end TIMESTAMPTZ NOT NULL,
+    source_vector_row_id VARCHAR(100) NOT NULL,
+    source_updated_at TIMESTAMPTZ NOT NULL,
+    source_ingested_at TIMESTAMPTZ NOT NULL,
+    synced_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT fk_user_behavior_vector_search_generation
+        FOREIGN KEY (vector_generation_id)
+        REFERENCES user_behavior_vector_search_generations (vector_generation_id),
+
+    CONSTRAINT fk_user_behavior_vector_search_project
+        FOREIGN KEY (project_id) REFERENCES projects (project_id),
+
+    CONSTRAINT chk_user_behavior_vector_search_dim
+        CHECK (vector_dim = 64),
+
+    CONSTRAINT uq_user_behavior_vector_search_generation_user
+        UNIQUE (vector_generation_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_behavior_vector_search_embedding_hnsw
+ON user_behavior_vector_search
+USING hnsw (embedding vector_cosine_ops);
 
 -- =========================================================
 -- 1. Campaigns
@@ -551,6 +655,7 @@ CREATE TABLE IF NOT EXISTS promotion_segment_suggestions (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     decided_at TIMESTAMPTZ,
+    audience_snapshot_id VARCHAR(100),
 
     CONSTRAINT fk_promotion_segment_suggestions_analysis
         FOREIGN KEY (analysis_id) REFERENCES promotion_analyses (analysis_id),
@@ -812,6 +917,7 @@ CREATE TABLE IF NOT EXISTS segment_vectors (
     source VARCHAR(50) NOT NULL DEFAULT 'decision_analysis',
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    embedding vector(64),
 
     CONSTRAINT fk_segment_vectors_project
         FOREIGN KEY (project_id) REFERENCES projects (project_id),
@@ -832,7 +938,13 @@ CREATE TABLE IF NOT EXISTS segment_vectors (
         CHECK (vector_dim = 64),
 
     CONSTRAINT chk_segment_vectors_source
-        CHECK (source IN ('decision_analysis', 'fixture', 'manual', 'batch_profile'))
+        CHECK (source IN (
+            'decision_analysis',
+            'fixture',
+            'manual',
+            'batch_profile',
+            'behavior_query'
+        ))
 );
 
 CREATE INDEX IF NOT EXISTS idx_segment_vectors_project_id
@@ -846,6 +958,151 @@ ON segment_vectors (promotion_id);
 
 CREATE INDEX IF NOT EXISTS idx_segment_vectors_promotion_run_id
 ON segment_vectors (promotion_run_id);
+
+-- =========================================================
+-- 12A. Segment Audience Snapshots
+-- Append-only audience resolution output managed by Decision.
+-- =========================================================
+CREATE TABLE IF NOT EXISTS segment_audience_snapshots (
+    snapshot_id VARCHAR(100) PRIMARY KEY,
+    suggestion_id VARCHAR(100),
+    analysis_id VARCHAR(100) NOT NULL,
+    project_id VARCHAR(100) NOT NULL,
+    campaign_id VARCHAR(100) NOT NULL,
+    promotion_id VARCHAR(100) NOT NULL,
+    segment_id VARCHAR(100) NOT NULL,
+    segment_vector_id VARCHAR(100) NOT NULL,
+    vector_generation_id VARCHAR(100) NOT NULL,
+
+    schema_version VARCHAR(50) NOT NULL,
+    vector_version VARCHAR(50) NOT NULL,
+    manifest_hash VARCHAR(128) NOT NULL,
+    audience_resolution_contract VARCHAR(100) NOT NULL,
+    segment_audience_spec_hash VARCHAR(128) NOT NULL,
+    query_vector_hash VARCHAR(128) NOT NULL,
+    query_compiler_version VARCHAR(100) NOT NULL,
+    query_compiler_hash VARCHAR(128) NOT NULL,
+    matcher_version VARCHAR(100) NOT NULL,
+    search_policy_version VARCHAR(100) NOT NULL,
+    calibration_version VARCHAR(100) NOT NULL,
+    calibration_hash VARCHAR(128) NOT NULL,
+    score_threshold NUMERIC(10, 6) NOT NULL,
+
+    source_cutoff TIMESTAMPTZ NOT NULL,
+    window_start TIMESTAMPTZ NOT NULL,
+    window_end TIMESTAMPTZ NOT NULL,
+    eligible_user_count INT NOT NULL,
+    behavior_match_count INT NOT NULL,
+    final_user_count INT NOT NULL,
+    min_sample_size INT NOT NULL,
+
+    audience_status VARCHAR(50) NOT NULL,
+    selection_method VARCHAR(50) NOT NULL,
+    estimated_recall NUMERIC(10, 6) NOT NULL,
+    recall_lower_bound NUMERIC(10, 6) NOT NULL,
+    recall_target NUMERIC(10, 6) NOT NULL,
+    input_fingerprint VARCHAR(128) NOT NULL,
+    meets_min_sample_size BOOLEAN NOT NULL,
+    status VARCHAR(50) NOT NULL DEFAULT 'completed',
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT fk_segment_audience_snapshots_analysis
+        FOREIGN KEY (analysis_id) REFERENCES promotion_analyses (analysis_id),
+
+    CONSTRAINT fk_segment_audience_snapshots_project
+        FOREIGN KEY (project_id) REFERENCES projects (project_id),
+
+    CONSTRAINT fk_segment_audience_snapshots_campaign
+        FOREIGN KEY (campaign_id) REFERENCES campaigns (campaign_id),
+
+    CONSTRAINT fk_segment_audience_snapshots_promotion
+        FOREIGN KEY (promotion_id) REFERENCES promotions (promotion_id),
+
+    CONSTRAINT fk_segment_audience_snapshots_segment
+        FOREIGN KEY (segment_id) REFERENCES segment_definitions (segment_id),
+
+    CONSTRAINT fk_segment_audience_snapshots_segment_vector
+        FOREIGN KEY (segment_vector_id) REFERENCES segment_vectors (segment_vector_id),
+
+    CONSTRAINT fk_segment_audience_snapshots_vector_generation
+        FOREIGN KEY (vector_generation_id)
+        REFERENCES user_behavior_vector_search_generations (vector_generation_id),
+
+    CONSTRAINT chk_segment_audience_snapshots_eligible_count
+        CHECK (eligible_user_count >= 0),
+
+    CONSTRAINT chk_segment_audience_snapshots_behavior_match_count
+        CHECK (
+            behavior_match_count >= 0
+            AND behavior_match_count <= eligible_user_count
+        ),
+
+    CONSTRAINT chk_segment_audience_snapshots_final_count
+        CHECK (
+            final_user_count >= 0
+            AND final_user_count <= behavior_match_count
+        ),
+
+    CONSTRAINT chk_segment_audience_snapshots_min_sample_size
+        CHECK (min_sample_size >= 0),
+
+    CONSTRAINT chk_segment_audience_snapshots_audience_status
+        CHECK (audience_status IN (
+            'no_eligible_audience',
+            'insufficient_sample',
+            'targetable'
+        )),
+
+    CONSTRAINT chk_segment_audience_snapshots_selection_method
+        CHECK (selection_method IN ('exact', 'transition', 'ann', 'exact_fallback')),
+
+    CONSTRAINT chk_segment_audience_snapshots_status
+        CHECK (status = 'completed')
+);
+
+CREATE TABLE IF NOT EXISTS segment_audience_members (
+    snapshot_id VARCHAR(100) NOT NULL,
+    user_id VARCHAR(255) NOT NULL,
+    behavior_fit_score NUMERIC(10, 6),
+    retrieval_source VARCHAR(50) NOT NULL,
+    retrieval_rank INT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT fk_segment_audience_members_snapshot
+        FOREIGN KEY (snapshot_id) REFERENCES segment_audience_snapshots (snapshot_id),
+
+    CONSTRAINT chk_segment_audience_members_score
+        CHECK (
+            behavior_fit_score IS NULL
+            OR (behavior_fit_score >= -1 AND behavior_fit_score <= 1)
+        ),
+
+    CONSTRAINT chk_segment_audience_members_retrieval_source
+        CHECK (retrieval_source IN ('exact', 'ann')),
+
+    CONSTRAINT chk_segment_audience_members_retrieval_rank
+        CHECK (retrieval_rank IS NULL OR retrieval_rank >= 1),
+
+    CONSTRAINT uq_segment_audience_members_snapshot_user
+        UNIQUE (snapshot_id, user_id)
+);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'promotion_segment_suggestions'::regclass
+          AND conname = 'fk_promotion_segment_suggestions_audience_snapshot'
+    ) THEN
+        ALTER TABLE promotion_segment_suggestions
+            ADD CONSTRAINT fk_promotion_segment_suggestions_audience_snapshot
+            FOREIGN KEY (audience_snapshot_id)
+            REFERENCES segment_audience_snapshots (snapshot_id);
+    END IF;
+END
+$$;
 
 -- =========================================================
 -- 13. Promotion Target Segments
@@ -875,6 +1132,7 @@ CREATE TABLE IF NOT EXISTS promotion_target_segments (
     confirmed_at TIMESTAMPTZ,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    audience_snapshot_id VARCHAR(100),
 
     CONSTRAINT fk_promotion_target_segments_analysis
         FOREIGN KEY (analysis_id) REFERENCES promotion_analyses (analysis_id),
@@ -896,6 +1154,9 @@ CREATE TABLE IF NOT EXISTS promotion_target_segments (
 
     CONSTRAINT fk_promotion_target_segments_suggestion
         FOREIGN KEY (suggestion_id) REFERENCES promotion_segment_suggestions (suggestion_id),
+
+    CONSTRAINT fk_promotion_target_segments_audience_snapshot
+        FOREIGN KEY (audience_snapshot_id) REFERENCES segment_audience_snapshots (snapshot_id),
 
     CONSTRAINT chk_promotion_target_segments_priority
         CHECK (priority IS NULL OR priority IN ('low', 'medium', 'high')),
@@ -1153,7 +1414,13 @@ CREATE TABLE IF NOT EXISTS user_segment_assignments (
         CHECK (similarity_score IS NULL OR (similarity_score >= 0 AND similarity_score <= 1)),
 
     CONSTRAINT chk_user_segment_assignments_source
-        CHECK (assignment_source IN ('decision_batch', 'fallback', 'manual', 'fixture')),
+        CHECK (assignment_source IN (
+            'decision_batch',
+            'fallback',
+            'manual',
+            'fixture',
+            'analysis_snapshot'
+        )),
 
     CONSTRAINT uq_user_segment_assignments_run_user
         UNIQUE (promotion_run_id, user_id)
