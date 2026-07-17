@@ -1,5 +1,5 @@
 -- =========================================================
--- Loop-Ad ClickHouse Schema Contract v1.6
+-- Loop-Ad ClickHouse Schema Contract v1.7
 -- Owner: loop-ad_data-source_contract
 -- Domain: hotel / accommodation booking
 --
@@ -289,6 +289,63 @@ SELECT
     ))))) AS vector_row_id,
     now64(6, 'UTC') AS ingested_at
 FROM user_behavior_vectors;
+
+-- =========================================================
+-- 5B. Promotion Audience Exclusion Projection
+-- PostgreSQL is authoritative. Projection checkpoints must advance only
+-- after every member state for that revision has been written.
+-- =========================================================
+CREATE TABLE IF NOT EXISTS promotion_audience_exclusion_projection
+(
+    project_id String,
+    campaign_id String,
+    promotion_id String,
+    user_id String,
+    state LowCardinality(String),
+    exclusion_revision UInt64,
+    updated_at DateTime64(6, 'UTC'),
+
+    CONSTRAINT chk_promotion_audience_exclusion_projection_state
+        CHECK state IN ('reserved', 'consumed', 'released')
+)
+ENGINE = ReplacingMergeTree(exclusion_revision)
+ORDER BY (project_id, promotion_id, user_id);
+
+CREATE TABLE IF NOT EXISTS promotion_audience_exclusion_projection_status
+(
+    project_id String,
+    promotion_id String,
+    applied_revision UInt64,
+    applied_at DateTime64(6, 'UTC')
+)
+ENGINE = ReplacingMergeTree(applied_revision)
+ORDER BY (project_id, promotion_id);
+
+CREATE VIEW IF NOT EXISTS promotion_audience_exclusion_active AS
+SELECT
+    project_id,
+    tupleElement(latest_state, 1) AS campaign_id,
+    promotion_id,
+    user_id,
+    tupleElement(latest_state, 2) AS state,
+    tupleElement(latest_state, 3) AS exclusion_revision,
+    tupleElement(latest_state, 4) AS updated_at
+FROM (
+    SELECT
+        project_id,
+        promotion_id,
+        user_id,
+        argMax(
+            tuple(campaign_id, state, exclusion_revision, updated_at),
+            tuple(exclusion_revision, updated_at)
+        ) AS latest_state
+    FROM promotion_audience_exclusion_projection
+    GROUP BY
+        project_id,
+        promotion_id,
+        user_id
+)
+WHERE tupleElement(latest_state, 2) IN ('reserved', 'consumed');
 
 -- =========================================================
 -- 6. Event Validation Errors
