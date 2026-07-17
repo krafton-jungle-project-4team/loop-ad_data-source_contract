@@ -1,7 +1,7 @@
 -- =========================================================
 -- Segment Audience V2 additive PostgreSQL expansion
--- Base contract: Loop-Ad PostgreSQL Schema Contract v1.6
--- Target contract: Loop-Ad PostgreSQL Schema Contract v1.7
+-- Base contract: Loop-Ad PostgreSQL Schema Contract v1.8
+-- Target contract: Loop-Ad PostgreSQL Schema Contract v1.9
 --
 -- This migration is additive and intentionally performs no data backfill.
 -- =========================================================
@@ -36,9 +36,6 @@ BEGIN
     END IF;
 END
 $$;
-
-ALTER TABLE segment_vectors
-    ADD COLUMN IF NOT EXISTS embedding vector(64);
 
 ALTER TABLE promotion_segment_suggestions
     ADD COLUMN IF NOT EXISTS audience_snapshot_id VARCHAR(100);
@@ -1094,7 +1091,7 @@ BEGIN
             ),
             (
                 'segment_vectors',
-                false,
+                true,
                 ARRAY['embedding']
             ),
             (

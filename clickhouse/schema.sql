@@ -1,5 +1,5 @@
 -- =========================================================
--- Loop-Ad ClickHouse Schema Contract v1.7
+-- Loop-Ad ClickHouse Schema Contract v1.6
 -- Owner: loop-ad_data-source_contract
 -- Domain: hotel / accommodation booking
 --
@@ -10,7 +10,6 @@
 --   - hotel profile views
 --   - funnel/segment-query support views
 --   - 64-dimensional user behavior vectors
---   - append-only user behavior vector revisions
 -- =========================================================
 
 CREATE DATABASE IF NOT EXISTS loopad;
@@ -238,7 +237,8 @@ ORDER BY (project_id, user_id, vector_version);
 
 -- =========================================================
 -- 5A. User Behavior Vector Revisions
--- Append-only source used to reproduce immutable PostgreSQL generations.
+-- Append-only deterministic input history for Decision matching.
+-- Existing user_behavior_vectors ingestion and consumers remain unchanged.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS user_behavior_vector_revisions
 (
@@ -252,24 +252,18 @@ CREATE TABLE IF NOT EXISTS user_behavior_vector_revisions
     window_end DateTime64(3, 'UTC'),
     updated_at DateTime64(3, 'UTC'),
     vector_row_id String,
-    ingested_at DateTime64(6, 'UTC') DEFAULT now64(6, 'UTC')
+    ingested_at DateTime64(6, 'UTC')
 )
 ENGINE = MergeTree
 ORDER BY (
     project_id,
-    vector_version,
-    window_start,
-    window_end,
     user_id,
+    vector_version,
     ingested_at,
+    updated_at,
     vector_row_id
 );
 
--- =========================================================
--- 5B. Materialized View: User Behavior Vectors -> Revisions
--- Every future insert into the latest table is preserved as a new revision.
--- Existing rows are intentionally not backfilled by this canonical DDL.
--- =========================================================
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_user_behavior_vectors_to_revisions
 TO user_behavior_vector_revisions AS
 SELECT
@@ -282,7 +276,17 @@ SELECT
     window_start,
     window_end,
     updated_at,
-    toString(generateUUIDv4()) AS vector_row_id,
+    lower(hex(SHA256(toJSONString(tuple(
+        project_id,
+        user_id,
+        vector_version,
+        toUnixTimestamp64Milli(updated_at),
+        vector_dim,
+        vector_values,
+        CAST(source, 'String'),
+        toUnixTimestamp64Milli(window_start),
+        toUnixTimestamp64Milli(window_end)
+    ))))) AS vector_row_id,
     now64(6, 'UTC') AS ingested_at
 FROM user_behavior_vectors;
 
@@ -368,25 +372,86 @@ WHERE event_name IN (
 -- =========================================================
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_raw_to_promotion_touch_events
 TO promotion_touch_events AS
+WITH
+    JSONExtractRaw(properties_json, 'page') AS page_json,
+    JSONExtractString(properties_json, 'target_url') AS target_url_prop,
+    JSONExtractString(properties_json, 'landing_url') AS landing_url_prop,
+    JSONExtractString(properties_json, 'previous_url') AS previous_url_prop,
+    JSONExtractString(page_json, 'url') AS page_url,
+    JSONExtractString(page_json, 'previous_url') AS page_previous_url
 SELECT
     event_time,
     event_name,
     project_id,
-    JSONExtractString(properties_json, 'campaign_id') AS campaign_id,
-    JSONExtractString(properties_json, 'promotion_id') AS promotion_id,
-    JSONExtractString(properties_json, 'promotion_run_id') AS promotion_run_id,
-    JSONExtractString(properties_json, 'ad_experiment_id') AS ad_experiment_id,
+    ifNull(coalesce(
+        nullIf(JSONExtractString(properties_json, 'campaign_id'), ''),
+        nullIf(extractURLParameter(target_url_prop, 'loopad_campaign_id'), ''),
+        nullIf(extractURLParameter(previous_url_prop, 'loopad_campaign_id'), ''),
+        nullIf(extractURLParameter(page_url, 'loopad_campaign_id'), ''),
+        nullIf(extractURLParameter(page_previous_url, 'loopad_campaign_id'), '')
+    ), '') AS campaign_id,
+    ifNull(coalesce(
+        nullIf(JSONExtractString(properties_json, 'promotion_id'), ''),
+        nullIf(extractURLParameter(target_url_prop, 'loopad_promotion_id'), ''),
+        nullIf(extractURLParameter(previous_url_prop, 'loopad_promotion_id'), ''),
+        nullIf(extractURLParameter(page_url, 'loopad_promotion_id'), ''),
+        nullIf(extractURLParameter(page_previous_url, 'loopad_promotion_id'), '')
+    ), '') AS promotion_id,
+    ifNull(coalesce(
+        nullIf(JSONExtractString(properties_json, 'promotion_run_id'), ''),
+        nullIf(extractURLParameter(target_url_prop, 'loopad_promotion_run_id'), ''),
+        nullIf(extractURLParameter(previous_url_prop, 'loopad_promotion_run_id'), ''),
+        nullIf(extractURLParameter(page_url, 'loopad_promotion_run_id'), ''),
+        nullIf(extractURLParameter(page_previous_url, 'loopad_promotion_run_id'), '')
+    ), '') AS promotion_run_id,
+    ifNull(coalesce(
+        nullIf(JSONExtractString(properties_json, 'ad_experiment_id'), ''),
+        nullIf(extractURLParameter(target_url_prop, 'loopad_ad_experiment_id'), ''),
+        nullIf(extractURLParameter(previous_url_prop, 'loopad_ad_experiment_id'), ''),
+        nullIf(extractURLParameter(page_url, 'loopad_ad_experiment_id'), ''),
+        nullIf(extractURLParameter(page_previous_url, 'loopad_ad_experiment_id'), '')
+    ), '') AS ad_experiment_id,
     user_id,
     session_id,
-    JSONExtractString(properties_json, 'segment_id') AS segment_id,
-    JSONExtractString(properties_json, 'promotion_channel') AS channel,
-    JSONExtractString(properties_json, 'content_id') AS content_id,
-    JSONExtractString(properties_json, 'content_option_id') AS content_option_id,
+    ifNull(coalesce(
+        nullIf(JSONExtractString(properties_json, 'segment_id'), ''),
+        nullIf(extractURLParameter(target_url_prop, 'loopad_segment_id'), ''),
+        nullIf(extractURLParameter(previous_url_prop, 'loopad_segment_id'), ''),
+        nullIf(extractURLParameter(page_url, 'loopad_segment_id'), ''),
+        nullIf(extractURLParameter(page_previous_url, 'loopad_segment_id'), '')
+    ), '') AS segment_id,
+    ifNull(coalesce(
+        nullIf(JSONExtractString(properties_json, 'promotion_channel'), ''),
+        nullIf(extractURLParameter(target_url_prop, 'loopad_promotion_channel'), ''),
+        nullIf(extractURLParameter(previous_url_prop, 'loopad_promotion_channel'), ''),
+        nullIf(extractURLParameter(page_url, 'loopad_promotion_channel'), ''),
+        nullIf(extractURLParameter(page_previous_url, 'loopad_promotion_channel'), '')
+    ), '') AS channel,
+    ifNull(coalesce(
+        nullIf(JSONExtractString(properties_json, 'content_id'), ''),
+        nullIf(extractURLParameter(target_url_prop, 'loopad_content_id'), ''),
+        nullIf(extractURLParameter(previous_url_prop, 'loopad_content_id'), ''),
+        nullIf(extractURLParameter(page_url, 'loopad_content_id'), ''),
+        nullIf(extractURLParameter(page_previous_url, 'loopad_content_id'), '')
+    ), '') AS content_id,
+    ifNull(coalesce(
+        nullIf(JSONExtractString(properties_json, 'content_option_id'), ''),
+        nullIf(extractURLParameter(target_url_prop, 'loopad_content_option_id'), ''),
+        nullIf(extractURLParameter(previous_url_prop, 'loopad_content_option_id'), ''),
+        nullIf(extractURLParameter(page_url, 'loopad_content_option_id'), ''),
+        nullIf(extractURLParameter(page_previous_url, 'loopad_content_option_id'), '')
+    ), '') AS content_option_id,
     source,
-    nullIf(JSONExtractString(properties_json, 'redirect_id'), '') AS redirect_id,
+    coalesce(
+        nullIf(JSONExtractString(properties_json, 'redirect_id'), ''),
+        nullIf(extractURLParameter(target_url_prop, 'loopad_redirect_id'), ''),
+        nullIf(extractURLParameter(previous_url_prop, 'loopad_redirect_id'), ''),
+        nullIf(extractURLParameter(page_url, 'loopad_redirect_id'), ''),
+        nullIf(extractURLParameter(page_previous_url, 'loopad_redirect_id'), '')
+    ) AS redirect_id,
     nullIf(JSONExtractString(properties_json, 'placement_id'), '') AS placement_id,
-    nullIf(JSONExtractString(properties_json, 'landing_url'), '') AS landing_url,
-    nullIf(JSONExtractString(properties_json, 'target_url'), '') AS target_url,
+    nullIf(landing_url_prop, '') AS landing_url,
+    nullIf(target_url_prop, '') AS target_url,
     properties_json
 FROM raw_events
 WHERE event_name IN (
@@ -404,19 +469,67 @@ WHERE event_name IN (
 -- =========================================================
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_raw_to_booking_outcome_events
 TO booking_outcome_events AS
+WITH
+    JSONExtractRaw(properties_json, 'page') AS page_json,
+    JSONExtractString(properties_json, 'target_url') AS target_url_prop,
+    JSONExtractString(properties_json, 'previous_url') AS previous_url_prop,
+    JSONExtractString(page_json, 'url') AS page_url,
+    JSONExtractString(page_json, 'previous_url') AS page_previous_url
 SELECT
     event_time,
     event_name,
     project_id,
-    nullIf(JSONExtractString(properties_json, 'campaign_id'), '') AS campaign_id,
-    nullIf(JSONExtractString(properties_json, 'promotion_id'), '') AS promotion_id,
-    nullIf(JSONExtractString(properties_json, 'promotion_run_id'), '') AS promotion_run_id,
-    nullIf(JSONExtractString(properties_json, 'ad_experiment_id'), '') AS ad_experiment_id,
+    coalesce(
+        nullIf(JSONExtractString(properties_json, 'campaign_id'), ''),
+        nullIf(extractURLParameter(target_url_prop, 'loopad_campaign_id'), ''),
+        nullIf(extractURLParameter(previous_url_prop, 'loopad_campaign_id'), ''),
+        nullIf(extractURLParameter(page_url, 'loopad_campaign_id'), ''),
+        nullIf(extractURLParameter(page_previous_url, 'loopad_campaign_id'), '')
+    ) AS campaign_id,
+    coalesce(
+        nullIf(JSONExtractString(properties_json, 'promotion_id'), ''),
+        nullIf(extractURLParameter(target_url_prop, 'loopad_promotion_id'), ''),
+        nullIf(extractURLParameter(previous_url_prop, 'loopad_promotion_id'), ''),
+        nullIf(extractURLParameter(page_url, 'loopad_promotion_id'), ''),
+        nullIf(extractURLParameter(page_previous_url, 'loopad_promotion_id'), '')
+    ) AS promotion_id,
+    coalesce(
+        nullIf(JSONExtractString(properties_json, 'promotion_run_id'), ''),
+        nullIf(extractURLParameter(target_url_prop, 'loopad_promotion_run_id'), ''),
+        nullIf(extractURLParameter(previous_url_prop, 'loopad_promotion_run_id'), ''),
+        nullIf(extractURLParameter(page_url, 'loopad_promotion_run_id'), ''),
+        nullIf(extractURLParameter(page_previous_url, 'loopad_promotion_run_id'), '')
+    ) AS promotion_run_id,
+    coalesce(
+        nullIf(JSONExtractString(properties_json, 'ad_experiment_id'), ''),
+        nullIf(extractURLParameter(target_url_prop, 'loopad_ad_experiment_id'), ''),
+        nullIf(extractURLParameter(previous_url_prop, 'loopad_ad_experiment_id'), ''),
+        nullIf(extractURLParameter(page_url, 'loopad_ad_experiment_id'), ''),
+        nullIf(extractURLParameter(page_previous_url, 'loopad_ad_experiment_id'), '')
+    ) AS ad_experiment_id,
     user_id,
     session_id,
-    nullIf(JSONExtractString(properties_json, 'segment_id'), '') AS segment_id,
-    nullIf(JSONExtractString(properties_json, 'content_id'), '') AS content_id,
-    nullIf(JSONExtractString(properties_json, 'content_option_id'), '') AS content_option_id,
+    coalesce(
+        nullIf(JSONExtractString(properties_json, 'segment_id'), ''),
+        nullIf(extractURLParameter(target_url_prop, 'loopad_segment_id'), ''),
+        nullIf(extractURLParameter(previous_url_prop, 'loopad_segment_id'), ''),
+        nullIf(extractURLParameter(page_url, 'loopad_segment_id'), ''),
+        nullIf(extractURLParameter(page_previous_url, 'loopad_segment_id'), '')
+    ) AS segment_id,
+    coalesce(
+        nullIf(JSONExtractString(properties_json, 'content_id'), ''),
+        nullIf(extractURLParameter(target_url_prop, 'loopad_content_id'), ''),
+        nullIf(extractURLParameter(previous_url_prop, 'loopad_content_id'), ''),
+        nullIf(extractURLParameter(page_url, 'loopad_content_id'), ''),
+        nullIf(extractURLParameter(page_previous_url, 'loopad_content_id'), '')
+    ) AS content_id,
+    coalesce(
+        nullIf(JSONExtractString(properties_json, 'content_option_id'), ''),
+        nullIf(extractURLParameter(target_url_prop, 'loopad_content_option_id'), ''),
+        nullIf(extractURLParameter(previous_url_prop, 'loopad_content_option_id'), ''),
+        nullIf(extractURLParameter(page_url, 'loopad_content_option_id'), ''),
+        nullIf(extractURLParameter(page_previous_url, 'loopad_content_option_id'), '')
+    ) AS content_option_id,
     JSONExtractString(properties_json, 'booking_id') AS booking_id,
     multiIf(
         event_name = 'booking_start', 'started',

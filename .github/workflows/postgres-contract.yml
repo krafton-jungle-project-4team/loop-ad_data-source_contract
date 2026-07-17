@@ -1,0 +1,47 @@
+name: Data source contracts
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/postgres-contract.yml"
+      - "postgres/**"
+      - "clickhouse/**"
+      - "scripts/verify_postgres_contract.sh"
+      - "scripts/verify_clickhouse_contract.sh"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/postgres-contract.yml"
+      - "postgres/**"
+      - "clickhouse/**"
+      - "scripts/verify_postgres_contract.sh"
+      - "scripts/verify_clickhouse_contract.sh"
+
+permissions:
+  contents: read
+
+jobs:
+  verify-postgres-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify fresh schema, dummy data, and migrations
+        env:
+          BASE_REF: origin/${{ github.base_ref || 'main' }}
+        run: ./scripts/verify_postgres_contract.sh
+
+  verify-clickhouse-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify fresh schema, vector revisions, and migration
+        env:
+          CLICKHOUSE_BASE_REF: ca4f456f40255ec758937a8c84ea7f5566cc9d0a
+        run: ./scripts/verify_clickhouse_contract.sh

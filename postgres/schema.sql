@@ -1,6 +1,6 @@
 -- =========================================================
--- Loop-Ad PostgreSQL Schema Contract v1.7
--- Draft: promotion segment suggestion / confirmation flow
+-- Loop-Ad PostgreSQL Schema Contract v1.9
+-- Draft: promotion scope, Generation v1, and Segment Audience V2 contracts
 -- Owner: loop-ad_data-source_contract
 -- Domain: hotel / accommodation booking
 --
@@ -19,6 +19,7 @@
 BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 DO $$
 DECLARE
@@ -44,6 +45,69 @@ BEGIN
             'pgvector >= 0.8.0 is required, found %',
             vector_extversion;
     END IF;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION is_valid_promotion_run_segment_scope(
+    p_segment_scope_json JSONB,
+    p_segment_scope_fingerprint TEXT
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+PARALLEL SAFE
+AS $$
+DECLARE
+    scope_item JSONB;
+    segment_id TEXT;
+    canonical_scope_json JSONB;
+    canonical_scope_serialized TEXT;
+BEGIN
+    IF jsonb_typeof(p_segment_scope_json) <> 'array'
+       OR jsonb_array_length(p_segment_scope_json) = 0 THEN
+        RETURN false;
+    END IF;
+
+    FOR scope_item IN
+        SELECT value
+        FROM jsonb_array_elements(p_segment_scope_json) AS scope_items(value)
+    LOOP
+        IF jsonb_typeof(scope_item) <> 'string' THEN
+            RETURN false;
+        END IF;
+
+        segment_id := scope_item #>> '{}';
+        IF btrim(segment_id) = ''
+           OR segment_id <> btrim(segment_id)
+           OR segment_id = 'seg_existing_all' THEN
+            RETURN false;
+        END IF;
+    END LOOP;
+
+    SELECT
+        jsonb_agg(
+            normalized.segment_id
+            ORDER BY normalized.segment_id COLLATE "C"
+        ),
+        '[' || string_agg(
+            to_json(normalized.segment_id)::text,
+            ',' ORDER BY normalized.segment_id COLLATE "C"
+        ) || ']'
+    INTO canonical_scope_json, canonical_scope_serialized
+    FROM (
+        SELECT DISTINCT scope_values.value #>> '{}' AS segment_id
+        FROM jsonb_array_elements(p_segment_scope_json) AS scope_values(value)
+    ) AS normalized;
+
+    RETURN p_segment_scope_json = canonical_scope_json
+       AND p_segment_scope_fingerprint = encode(
+            digest(
+                convert_to(canonical_scope_serialized, 'UTF8'),
+                'sha256'
+            ),
+            'hex'
+       );
 END
 $$;
 
@@ -331,7 +395,7 @@ ON segment_query_previews (sample_size_status);
 -- =========================================================
 CREATE TABLE IF NOT EXISTS segment_definitions (
     segment_id VARCHAR(100) PRIMARY KEY,
-    project_id VARCHAR(100) NOT NULL,
+    project_id VARCHAR(100),
     campaign_id VARCHAR(100),
     promotion_id VARCHAR(100),
 
@@ -383,8 +447,78 @@ CREATE TABLE IF NOT EXISTS segment_definitions (
         CHECK (
             promotion_id IS NULL
             OR campaign_id IS NOT NULL
+        ),
+
+    CONSTRAINT chk_segment_definitions_project_scope
+        CHECK (
+            (
+                segment_id = 'seg_existing_all'
+                AND project_id IS NULL
+                AND campaign_id IS NULL
+                AND promotion_id IS NULL
+                AND query_preview_id IS NULL
+                AND source = 'system_default'
+            )
+            OR (
+                segment_id <> 'seg_existing_all'
+                AND project_id IS NOT NULL
+            )
         )
 );
+
+-- The fallback segment is a global system identity shared by every project.
+-- Keep ordinary segments project-scoped while allowing this one FK target to
+-- survive project deletion and fresh databases without fixture data.
+INSERT INTO segment_definitions (
+    segment_id,
+    project_id,
+    campaign_id,
+    promotion_id,
+    segment_name,
+    source,
+    query_preview_id,
+    natural_language_query,
+    generated_sql,
+    rule_json,
+    profile_json,
+    sample_size,
+    total_eligible_user_count,
+    sample_ratio,
+    status
+)
+VALUES (
+    'seg_existing_all',
+    NULL,
+    NULL,
+    NULL,
+    'All existing users',
+    'system_default',
+    NULL,
+    NULL,
+    NULL,
+    '{"type": "all_existing_users"}'::jsonb,
+    '{"description": "Global fallback for all existing users."}'::jsonb,
+    0,
+    0,
+    0,
+    'active'
+)
+ON CONFLICT (segment_id) DO UPDATE SET
+    project_id = NULL,
+    campaign_id = NULL,
+    promotion_id = NULL,
+    segment_name = EXCLUDED.segment_name,
+    source = EXCLUDED.source,
+    query_preview_id = NULL,
+    natural_language_query = NULL,
+    generated_sql = NULL,
+    rule_json = EXCLUDED.rule_json,
+    profile_json = EXCLUDED.profile_json,
+    sample_size = EXCLUDED.sample_size,
+    total_eligible_user_count = EXCLUDED.total_eligible_user_count,
+    sample_ratio = EXCLUDED.sample_ratio,
+    status = EXCLUDED.status,
+    updated_at = now();
 
 CREATE INDEX IF NOT EXISTS idx_segment_definitions_project_id
 ON segment_definitions (project_id);
@@ -714,6 +848,21 @@ CREATE TABLE IF NOT EXISTS generation_runs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
+    -- Generation v1 columns are appended to preserve the legacy physical
+    -- column order across fresh and expanded databases.
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ,
+    retry_count INT NOT NULL DEFAULT 0,
+    next_retry_at TIMESTAMPTZ,
+    last_error_code VARCHAR(100),
+    last_error_message TEXT,
+    worker_id VARCHAR(200),
+    lease_token UUID,
+    heartbeat_at TIMESTAMPTZ,
+    lease_expires_at TIMESTAMPTZ,
+    idempotency_key VARCHAR(200),
+    request_fingerprint CHAR(64),
+
     CONSTRAINT fk_generation_runs_analysis
         FOREIGN KEY (analysis_id) REFERENCES promotion_analyses (analysis_id),
 
@@ -730,7 +879,63 @@ CREATE TABLE IF NOT EXISTS generation_runs (
         CHECK (status IN ('requested', 'running', 'completed', 'failed')),
 
     CONSTRAINT chk_generation_runs_option_count
-        CHECK (content_option_count >= 1)
+        CHECK (content_option_count >= 1),
+
+    CONSTRAINT chk_generation_runs_retry_count
+        CHECK (retry_count >= 0),
+
+    CONSTRAINT chk_generation_runs_fingerprint
+        CHECK (
+            request_fingerprint IS NULL
+            OR request_fingerprint ~ '^[0-9a-f]{64}$'
+        ),
+
+    CONSTRAINT chk_generation_runs_idempotency_fingerprint
+        CHECK (
+            idempotency_key IS NULL
+            OR request_fingerprint IS NOT NULL
+        ),
+
+    CONSTRAINT chk_generation_runs_running_lease
+        CHECK (
+            status <> 'running'
+            OR (
+                started_at IS NOT NULL
+                AND worker_id IS NOT NULL
+                AND lease_token IS NOT NULL
+                AND heartbeat_at IS NOT NULL
+                AND lease_expires_at IS NOT NULL
+            )
+        ),
+
+    CONSTRAINT chk_generation_runs_terminal_times
+        CHECK (
+            status NOT IN ('completed', 'failed')
+            OR (started_at IS NOT NULL AND finished_at IS NOT NULL)
+        ),
+
+    CONSTRAINT chk_generation_runs_nonterminal_finished_at
+        CHECK (
+            status IN ('completed', 'failed')
+            OR finished_at IS NULL
+        ),
+
+    CONSTRAINT chk_generation_runs_inactive_lease_cleared
+        CHECK (
+            status = 'running'
+            OR (
+                worker_id IS NULL
+                AND lease_token IS NULL
+                AND heartbeat_at IS NULL
+                AND lease_expires_at IS NULL
+            )
+        ),
+
+    CONSTRAINT chk_generation_runs_retry_schedule
+        CHECK (
+            next_retry_at IS NULL
+            OR status = 'requested'
+        )
 );
 
 CREATE INDEX IF NOT EXISTS idx_generation_runs_analysis_id
@@ -741,6 +946,22 @@ ON generation_runs (promotion_id);
 
 CREATE INDEX IF NOT EXISTS idx_generation_runs_status
 ON generation_runs (status);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_generation_runs_project_idempotency
+ON generation_runs (project_id, idempotency_key)
+WHERE idempotency_key IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_generation_runs_claimable
+ON generation_runs (
+    COALESCE(next_retry_at, created_at),
+    created_at,
+    generation_id
+)
+WHERE status = 'requested';
+
+CREATE INDEX IF NOT EXISTS idx_generation_runs_expired_lease
+ON generation_runs (lease_expires_at)
+WHERE status = 'running';
 
 -- =========================================================
 -- 10. Content Candidates
@@ -771,7 +992,7 @@ CREATE TABLE IF NOT EXISTS content_candidates (
     -- sms
     message TEXT,
 
-    -- onsite_banner
+    -- email / onsite_banner image
     image_prompt TEXT,
     image_url TEXT,
 
@@ -785,6 +1006,18 @@ CREATE TABLE IF NOT EXISTS content_candidates (
     status VARCHAR(50) NOT NULL DEFAULT 'draft',
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    -- Generation v1 columns are appended to preserve the legacy physical
+    -- column order across fresh and expanded databases.
+    creative_format VARCHAR(50),
+    image_generation_status VARCHAR(50),
+    artifact_status VARCHAR(50),
+    artifact_storage_key TEXT,
+    artifact_public_url TEXT,
+    artifact_sha256 CHAR(64),
+    artifact_content_type VARCHAR(100),
+    artifact_error_code VARCHAR(100),
+    artifact_published_at TIMESTAMPTZ,
 
     CONSTRAINT fk_content_candidates_generation
         FOREIGN KEY (generation_id) REFERENCES generation_runs (generation_id),
@@ -810,6 +1043,83 @@ CREATE TABLE IF NOT EXISTS content_candidates (
     CONSTRAINT chk_content_candidates_status
         CHECK (status IN ('draft', 'approved', 'rejected', 'active', 'archived')),
 
+    CONSTRAINT chk_content_candidates_creative_format
+        CHECK (
+            creative_format IS NULL
+            OR creative_format IN ('email_html', 'banner_html', 'sms_text')
+        ),
+
+    CONSTRAINT chk_content_candidates_channel_format
+        CHECK (
+            creative_format IS NULL
+            OR (channel = 'email' AND creative_format = 'email_html')
+            OR (channel = 'onsite_banner' AND creative_format = 'banner_html')
+            OR (channel = 'sms' AND creative_format = 'sms_text')
+        ),
+
+    CONSTRAINT chk_content_candidates_image_generation_status
+        CHECK (
+            image_generation_status IS NULL
+            OR image_generation_status IN (
+                'not_required', 'pending', 'running', 'completed', 'failed'
+            )
+        ),
+
+    CONSTRAINT chk_content_candidates_artifact_status
+        CHECK (
+            artifact_status IS NULL
+            OR artifact_status IN ('not_required', 'pending', 'published', 'failed')
+        ),
+
+    CONSTRAINT chk_content_candidates_channel_lifecycle
+        CHECK (
+            creative_format IS NULL
+            OR image_generation_status IS NULL
+            OR artifact_status IS NULL
+            OR (
+                creative_format = 'sms_text'
+                AND image_generation_status = 'not_required'
+                AND artifact_status = 'not_required'
+            )
+            OR (
+                creative_format IN ('email_html', 'banner_html')
+                AND image_generation_status IN (
+                    'pending', 'running', 'completed', 'failed'
+                )
+                AND artifact_status IN ('pending', 'published', 'failed')
+            )
+        ),
+
+    CONSTRAINT chk_content_candidates_artifact_sha256
+        CHECK (
+            artifact_sha256 IS NULL
+            OR artifact_sha256 ~ '^[0-9a-f]{64}$'
+        ),
+
+    CONSTRAINT chk_content_candidates_completed_image
+        CHECK (
+            image_generation_status IS DISTINCT FROM 'completed'
+            OR image_url IS NOT NULL
+        ),
+
+    CONSTRAINT chk_content_candidates_published_artifact
+        CHECK (
+            artifact_status IS DISTINCT FROM 'published'
+            OR (
+                artifact_storage_key IS NOT NULL
+                AND artifact_public_url IS NOT NULL
+                AND artifact_sha256 IS NOT NULL
+                AND artifact_content_type IS NOT NULL
+                AND artifact_published_at IS NOT NULL
+            )
+        ),
+
+    CONSTRAINT chk_content_candidates_artifact_error
+        CHECK (
+            artifact_status IS DISTINCT FROM 'failed'
+            OR artifact_error_code IS NOT NULL
+        ),
+
     CONSTRAINT uq_content_candidates_option
         UNIQUE (generation_id, segment_id, content_option_id)
 );
@@ -830,6 +1140,92 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_content_candidates_one_approved_per_segment
 ON content_candidates (generation_id, segment_id)
 WHERE status IN ('approved', 'active');
 
+CREATE INDEX IF NOT EXISTS idx_content_candidates_artifact_status
+ON content_candidates (generation_id, artifact_status);
+
+-- =========================================================
+-- 10A. Generation RAG Retrieval Documents
+-- Logical ownership boundary for Generation v1. The shared application role
+-- remains unchanged; every retrieval must still hard-filter project_id.
+-- =========================================================
+CREATE SCHEMA IF NOT EXISTS generation_rag;
+
+CREATE TABLE IF NOT EXISTS generation_rag.retrieval_documents (
+    document_id VARCHAR(100) PRIMARY KEY,
+    project_id VARCHAR(100) NOT NULL,
+    context_version VARCHAR(100) NOT NULL,
+
+    source_kind VARCHAR(50) NOT NULL,
+    source_id VARCHAR(200) NOT NULL,
+    source_version VARCHAR(100) NOT NULL,
+    chunk_index INT NOT NULL DEFAULT 0,
+
+    s3_key TEXT,
+    document_text TEXT NOT NULL DEFAULT '',
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+    embedding vector(1024),
+    embedding_model VARCHAR(100) NOT NULL,
+    embedding_version VARCHAR(100) NOT NULL,
+    content_sha256 CHAR(64) NOT NULL,
+
+    status VARCHAR(50) NOT NULL DEFAULT 'pending',
+    last_error_code VARCHAR(100),
+    last_error_message TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT fk_generation_rag_project
+        FOREIGN KEY (project_id) REFERENCES public.projects (project_id),
+
+    CONSTRAINT chk_generation_rag_source_kind
+        CHECK (source_kind IN (
+            'brand_asset', 'brand_guide', 'historical_creative'
+        )),
+
+    CONSTRAINT chk_generation_rag_chunk_index
+        CHECK (chunk_index >= 0),
+
+    CONSTRAINT chk_generation_rag_status
+        CHECK (status IN ('pending', 'active', 'failed', 'archived')),
+
+    CONSTRAINT chk_generation_rag_active_embedding
+        CHECK (status <> 'active' OR embedding IS NOT NULL),
+
+    CONSTRAINT chk_generation_rag_content_sha256
+        CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
+
+    CONSTRAINT uq_generation_rag_source_context_chunk_embedding
+        UNIQUE (
+            project_id,
+            context_version,
+            source_kind,
+            source_id,
+            source_version,
+            chunk_index,
+            embedding_model,
+            embedding_version
+        )
+);
+
+CREATE INDEX IF NOT EXISTS idx_generation_rag_retrieval_filter
+ON generation_rag.retrieval_documents (
+    project_id,
+    context_version,
+    source_kind,
+    status,
+    embedding_model,
+    embedding_version
+);
+
+CREATE INDEX IF NOT EXISTS idx_generation_rag_source
+ON generation_rag.retrieval_documents (
+    project_id,
+    source_kind,
+    source_id,
+    source_version
+);
+
 -- =========================================================
 -- 11. Promotion Runs
 -- Promotion loop grouping. Actual experiments are ad_experiments.
@@ -845,6 +1241,8 @@ CREATE TABLE IF NOT EXISTS promotion_runs (
     loop_count INT NOT NULL DEFAULT 1,
     status VARCHAR(50) NOT NULL DEFAULT 'planned',
     goal_snapshot_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    segment_scope_json JSONB NOT NULL,
+    segment_scope_fingerprint VARCHAR(64) NOT NULL,
 
     started_at TIMESTAMPTZ,
     ended_at TIMESTAMPTZ,
@@ -882,8 +1280,21 @@ CREATE TABLE IF NOT EXISTS promotion_runs (
     CONSTRAINT chk_promotion_runs_loop_count
         CHECK (loop_count >= 1),
 
-    CONSTRAINT uq_promotion_runs_loop
-        UNIQUE (promotion_id, loop_count)
+    CONSTRAINT chk_promotion_runs_segment_scope
+        CHECK (is_valid_promotion_run_segment_scope(
+            segment_scope_json,
+            segment_scope_fingerprint
+        )),
+
+    CONSTRAINT uq_promotion_runs_segment_scope
+        UNIQUE (
+            project_id,
+            promotion_id,
+            analysis_id,
+            generation_id,
+            segment_scope_fingerprint,
+            loop_count
+        )
 );
 
 CREATE INDEX IF NOT EXISTS idx_promotion_runs_project_id
@@ -894,6 +1305,9 @@ ON promotion_runs (campaign_id);
 
 CREATE INDEX IF NOT EXISTS idx_promotion_runs_promotion_id
 ON promotion_runs (promotion_id);
+
+CREATE INDEX IF NOT EXISTS idx_promotion_runs_promotion_loop
+ON promotion_runs (promotion_id, loop_count);
 
 CREATE INDEX IF NOT EXISTS idx_promotion_runs_status
 ON promotion_runs (status);
@@ -913,11 +1327,11 @@ CREATE TABLE IF NOT EXISTS segment_vectors (
 
     vector_dim INT NOT NULL DEFAULT 64,
     vector_values JSONB NOT NULL,
+    embedding vector(64) NOT NULL,
     vector_version VARCHAR(50) NOT NULL DEFAULT 'v1',
     source VARCHAR(50) NOT NULL DEFAULT 'decision_analysis',
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    embedding vector(64),
 
     CONSTRAINT fk_segment_vectors_project
         FOREIGN KEY (project_id) REFERENCES projects (project_id),
@@ -958,6 +1372,9 @@ ON segment_vectors (promotion_id);
 
 CREATE INDEX IF NOT EXISTS idx_segment_vectors_promotion_run_id
 ON segment_vectors (promotion_run_id);
+
+CREATE INDEX IF NOT EXISTS idx_segment_vectors_embedding_hnsw
+ON segment_vectors USING hnsw (embedding vector_cosine_ops);
 
 -- =========================================================
 -- 12A. Segment Audience Snapshots
@@ -1204,6 +1621,9 @@ CREATE TABLE IF NOT EXISTS ad_experiments (
     content_id VARCHAR(100) NOT NULL,
     content_option_id VARCHAR(100) NOT NULL,
 
+    parent_ad_experiment_id VARCHAR(100),
+    source_evaluation_id VARCHAR(100),
+
     channel VARCHAR(50) NOT NULL,
     loop_count INT NOT NULL DEFAULT 1,
     status VARCHAR(50) NOT NULL DEFAULT 'planned',
@@ -1240,6 +1660,16 @@ CREATE TABLE IF NOT EXISTS ad_experiments (
 
     CONSTRAINT fk_ad_experiments_content
         FOREIGN KEY (content_id) REFERENCES content_candidates (content_id),
+
+    CONSTRAINT fk_ad_experiments_parent
+        FOREIGN KEY (parent_ad_experiment_id) REFERENCES ad_experiments (ad_experiment_id),
+
+    CONSTRAINT chk_ad_experiments_lineage_pair
+        CHECK (
+            (parent_ad_experiment_id IS NULL AND source_evaluation_id IS NULL)
+            OR
+            (parent_ad_experiment_id IS NOT NULL AND source_evaluation_id IS NOT NULL)
+        ),
 
     CONSTRAINT chk_ad_experiments_channel
         CHECK (channel IN ('email', 'sms', 'onsite_banner')),
@@ -1290,6 +1720,12 @@ ON ad_experiments (segment_id);
 
 CREATE INDEX IF NOT EXISTS idx_ad_experiments_status
 ON ad_experiments (status);
+
+CREATE INDEX IF NOT EXISTS idx_ad_experiments_parent_ad_experiment_id
+ON ad_experiments (parent_ad_experiment_id);
+
+CREATE INDEX IF NOT EXISTS idx_ad_experiments_source_evaluation_id
+ON ad_experiments (source_evaluation_id);
 
 -- =========================================================
 -- 15. Promotion Evaluations
@@ -1374,8 +1810,148 @@ ON promotion_evaluations (segment_id);
 CREATE INDEX IF NOT EXISTS idx_promotion_evaluations_status
 ON promotion_evaluations (status);
 
+CREATE INDEX IF NOT EXISTS idx_promotion_evaluations_individual_provenance
+ON promotion_evaluations (project_id, ad_experiment_id, status)
+WHERE ad_experiment_id IS NOT NULL;
+
+ALTER TABLE ad_experiments
+    ADD CONSTRAINT fk_ad_experiments_source_evaluation
+    FOREIGN KEY (source_evaluation_id) REFERENCES promotion_evaluations (evaluation_id);
+
 -- =========================================================
--- 16. User Segment Assignments
+-- 16. Next-loop Preparations
+-- Persists manual next-loop approval attempts before child activation.
+-- =========================================================
+CREATE TABLE IF NOT EXISTS next_loop_preparations (
+    next_loop_preparation_id VARCHAR(100) PRIMARY KEY,
+    source_promotion_run_id VARCHAR(100) NOT NULL,
+    analysis_id VARCHAR(100) NOT NULL,
+    generation_id VARCHAR(100) NOT NULL,
+
+    attempt_no INT NOT NULL,
+    failed_segment_ids_json JSONB NOT NULL,
+    failed_ad_experiment_ids_json JSONB NOT NULL,
+    source_evaluation_ids_json JSONB NOT NULL,
+
+    status VARCHAR(50) NOT NULL,
+    activated_promotion_run_id VARCHAR(100),
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT fk_next_loop_preparations_source_run
+        FOREIGN KEY (source_promotion_run_id) REFERENCES promotion_runs (promotion_run_id),
+
+    CONSTRAINT fk_next_loop_preparations_analysis
+        FOREIGN KEY (analysis_id) REFERENCES promotion_analyses (analysis_id),
+
+    CONSTRAINT fk_next_loop_preparations_generation
+        FOREIGN KEY (generation_id) REFERENCES generation_runs (generation_id),
+
+    CONSTRAINT fk_next_loop_preparations_activated_run
+        FOREIGN KEY (activated_promotion_run_id) REFERENCES promotion_runs (promotion_run_id),
+
+    CONSTRAINT chk_next_loop_preparations_attempt_no
+        CHECK (attempt_no >= 1),
+
+    CONSTRAINT chk_next_loop_preparations_failed_segment_ids_json
+        CHECK (
+            CASE
+                WHEN jsonb_typeof(failed_segment_ids_json) = 'array'
+                THEN jsonb_array_length(failed_segment_ids_json) > 0
+                ELSE false
+            END
+        ),
+
+    CONSTRAINT chk_next_loop_preparations_failed_ad_experiment_ids_json
+        CHECK (
+            CASE
+                WHEN jsonb_typeof(failed_ad_experiment_ids_json) = 'array'
+                THEN jsonb_array_length(failed_ad_experiment_ids_json) > 0
+                ELSE false
+            END
+        ),
+
+    CONSTRAINT chk_next_loop_preparations_source_evaluation_ids_json
+        CHECK (
+            CASE
+                WHEN jsonb_typeof(source_evaluation_ids_json) = 'array'
+                THEN jsonb_array_length(source_evaluation_ids_json) > 0
+                ELSE false
+            END
+        ),
+
+    CONSTRAINT chk_next_loop_preparations_status
+        CHECK (status IN ('awaiting_content_approval', 'rejected', 'activated')),
+
+    CONSTRAINT chk_next_loop_preparations_activation_pair
+        CHECK (
+            (status = 'activated' AND activated_promotion_run_id IS NOT NULL)
+            OR
+            (status IN ('awaiting_content_approval', 'rejected') AND activated_promotion_run_id IS NULL)
+        ),
+
+    CONSTRAINT uq_next_loop_preparations_source_attempt
+        UNIQUE (source_promotion_run_id, attempt_no)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_next_loop_preparations_awaiting_source_run
+ON next_loop_preparations (source_promotion_run_id)
+WHERE status = 'awaiting_content_approval';
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_next_loop_preparations_activated_run
+ON next_loop_preparations (activated_promotion_run_id)
+WHERE activated_promotion_run_id IS NOT NULL;
+
+-- =========================================================
+-- 17. Segment Assignment Execution Provenance
+-- Records the matcher/input contract used by one assignment execution.
+-- =========================================================
+CREATE TABLE IF NOT EXISTS segment_assignment_executions (
+    segment_assignment_execution_id VARCHAR(100) PRIMARY KEY,
+    promotion_run_id VARCHAR(100) NOT NULL,
+    request_fingerprint VARCHAR(64) NOT NULL,
+    input_fingerprint VARCHAR(64) NOT NULL,
+    matcher_strategy VARCHAR(100) NOT NULL,
+    matcher_version VARCHAR(100) NOT NULL,
+    vector_version VARCHAR(50) NOT NULL,
+    source_cutoff_at TIMESTAMPTZ NOT NULL,
+    input_manifest_json JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT fk_segment_assignment_executions_run
+        FOREIGN KEY (promotion_run_id)
+        REFERENCES promotion_runs (promotion_run_id)
+        ON UPDATE NO ACTION
+        ON DELETE NO ACTION,
+
+    CONSTRAINT chk_segment_assignment_executions_identifiers
+        CHECK (
+            btrim(segment_assignment_execution_id) <> ''
+            AND btrim(promotion_run_id) <> ''
+            AND btrim(matcher_strategy) <> ''
+            AND btrim(matcher_version) <> ''
+            AND btrim(vector_version) <> ''
+        ),
+
+    CONSTRAINT chk_segment_assignment_executions_fingerprints
+        CHECK (
+            request_fingerprint ~ '^[0-9a-f]{64}$'
+            AND input_fingerprint ~ '^[0-9a-f]{64}$'
+        ),
+
+    CONSTRAINT chk_segment_assignment_executions_input_manifest
+        CHECK (jsonb_typeof(input_manifest_json) = 'object'),
+
+    CONSTRAINT uq_segment_assignment_executions_run_request
+        UNIQUE (promotion_run_id, request_fingerprint),
+
+    CONSTRAINT uq_segment_assignment_executions_run_execution
+        UNIQUE (promotion_run_id, segment_assignment_execution_id)
+);
+
+-- =========================================================
+-- 18. User Segment Assignments
 -- Decision builds these in batch. Dashboard ad serving reads these.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS user_segment_assignments (
@@ -1391,15 +1967,29 @@ CREATE TABLE IF NOT EXISTS user_segment_assignments (
 
     similarity_score NUMERIC(10, 6),
     fallback BOOLEAN NOT NULL DEFAULT false,
+    fallback_reason VARCHAR(50),
     assignment_source VARCHAR(50) NOT NULL DEFAULT 'decision_batch',
     assigned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at TIMESTAMPTZ,
+    segment_assignment_execution_id VARCHAR(100),
 
     CONSTRAINT fk_user_segment_assignments_project
         FOREIGN KEY (project_id) REFERENCES projects (project_id),
 
     CONSTRAINT fk_user_segment_assignments_run
         FOREIGN KEY (promotion_run_id) REFERENCES promotion_runs (promotion_run_id),
+
+    CONSTRAINT fk_user_segment_assignments_execution
+        FOREIGN KEY (
+            promotion_run_id,
+            segment_assignment_execution_id
+        )
+        REFERENCES segment_assignment_executions (
+            promotion_run_id,
+            segment_assignment_execution_id
+        )
+        ON UPDATE NO ACTION
+        ON DELETE NO ACTION,
 
     CONSTRAINT fk_user_segment_assignments_segment
         FOREIGN KEY (segment_id) REFERENCES segment_definitions (segment_id),
@@ -1422,6 +2012,21 @@ CREATE TABLE IF NOT EXISTS user_segment_assignments (
             'analysis_snapshot'
         )),
 
+    CONSTRAINT chk_user_segment_assignments_fallback_reason
+        CHECK (
+            (fallback = false AND fallback_reason IS NULL)
+            OR
+            (
+                fallback = true
+                AND fallback_reason IS NOT NULL
+                AND fallback_reason IN (
+                    'below_threshold',
+                    'no_candidate',
+                    'invalid_user_vector'
+                )
+            )
+        ),
+
     CONSTRAINT uq_user_segment_assignments_run_user
         UNIQUE (promotion_run_id, user_id)
 );
@@ -1431,6 +2036,9 @@ ON user_segment_assignments (project_id);
 
 CREATE INDEX IF NOT EXISTS idx_user_segment_assignments_run_id
 ON user_segment_assignments (promotion_run_id);
+
+CREATE INDEX IF NOT EXISTS idx_user_segment_assignments_execution_id
+ON user_segment_assignments (segment_assignment_execution_id);
 
 CREATE INDEX IF NOT EXISTS idx_user_segment_assignments_user_id
 ON user_segment_assignments (user_id);
@@ -1442,7 +2050,7 @@ CREATE INDEX IF NOT EXISTS idx_user_segment_assignments_ad_experiment_id
 ON user_segment_assignments (ad_experiment_id);
 
 -- =========================================================
--- 17. Ad Dispatch Jobs
+-- 19. Ad Dispatch Jobs
 -- Dashboard-owned email/sms dispatch state.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS ad_dispatch_jobs (
@@ -1501,7 +2109,7 @@ CREATE INDEX IF NOT EXISTS idx_ad_dispatch_jobs_status
 ON ad_dispatch_jobs (status);
 
 -- =========================================================
--- 18. Redirect Links
+-- 20. Redirect Links
 -- Dashboard-owned redirect tracking for email/sms.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS redirect_links (
@@ -1556,7 +2164,7 @@ CREATE INDEX IF NOT EXISTS idx_redirect_links_user_id
 ON redirect_links (user_id);
 
 -- =========================================================
--- 19. Event Validation Errors
+-- 21. Event Validation Errors
 -- Collector/Dashboard can show bad event payloads.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS event_validation_errors (
@@ -1583,7 +2191,7 @@ CREATE INDEX IF NOT EXISTS idx_event_validation_errors_created_at
 ON event_validation_errors (created_at);
 
 -- =========================================================
--- 20. Active Ad Serving Assignments View
+-- 22. Active Ad Serving Assignments View
 -- Dashboard ad hot path uses DB/view; it must not call Decision API per request.
 -- =========================================================
 CREATE OR REPLACE VIEW active_ad_serving_assignments AS
@@ -1615,14 +2223,182 @@ SELECT
     cc.image_prompt,
     cc.image_url,
     cc.landing_url,
-    cc.status AS content_status
+    cc.status AS content_status,
+    cc.creative_format,
+    cc.image_generation_status,
+    cc.artifact_status,
+    cc.artifact_public_url,
+    cc.artifact_content_type
 FROM user_segment_assignments usa
 JOIN ad_experiments ae
   ON usa.ad_experiment_id = ae.ad_experiment_id
 JOIN content_candidates cc
   ON usa.content_id = cc.content_id
-WHERE ae.status IN ('approved', 'running')
+JOIN generation_runs gr
+  ON cc.generation_id = gr.generation_id
+-- Re-evaluation may change the latest evaluation result without changing execution state.
+-- Legacy serving therefore requires matching historical provenance, not latest-status equality.
+WHERE (
+        ae.status IN ('approved', 'running')
+        OR
+        (
+            ae.status IN ('goal_met', 'goal_not_met', 'insufficient_data')
+            AND ae.ended_at IS NULL
+            AND EXISTS (
+                SELECT 1
+                FROM promotion_evaluations pe
+                WHERE pe.ad_experiment_id IS NOT NULL
+                  AND pe.project_id = ae.project_id
+                  AND pe.campaign_id = ae.campaign_id
+                  AND pe.promotion_id = ae.promotion_id
+                  AND pe.promotion_run_id = ae.promotion_run_id
+                  AND pe.ad_experiment_id = ae.ad_experiment_id
+                  AND pe.status = ae.status
+            )
+        )
+    )
   AND cc.status IN ('approved', 'active')
+  AND gr.status = 'completed'
+  AND (
+        (
+            cc.channel = 'sms'
+            AND cc.message IS NOT NULL
+            AND cc.artifact_status = 'not_required'
+        )
+        OR
+        (
+            cc.channel IN ('email', 'onsite_banner')
+            AND cc.image_generation_status = 'completed'
+            AND cc.image_url IS NOT NULL
+            AND cc.artifact_status = 'published'
+            AND cc.artifact_public_url IS NOT NULL
+        )
+      )
   AND (usa.expires_at IS NULL OR usa.expires_at > now());
+
+-- =========================================================
+-- 22. SDK Tracking Plans
+-- Dashboard-owned draft plans and immutable published revisions.
+-- =========================================================
+CREATE TABLE IF NOT EXISTS tracking_plans (
+    tracking_plan_id VARCHAR(100) PRIMARY KEY,
+    project_id VARCHAR(100) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    status VARCHAR(50) NOT NULL DEFAULT 'draft',
+    current_revision INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT fk_tracking_plans_project
+        FOREIGN KEY (project_id) REFERENCES projects (project_id),
+
+    CONSTRAINT chk_tracking_plans_name
+        CHECK (btrim(name) <> ''),
+
+    CONSTRAINT chk_tracking_plans_status
+        CHECK (status IN ('draft', 'published', 'archived')),
+
+    CONSTRAINT chk_tracking_plans_current_revision
+        CHECK (current_revision >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tracking_plans_project_status
+ON tracking_plans (project_id, status);
+
+CREATE TABLE IF NOT EXISTS tracking_plan_revisions (
+    tracking_plan_id VARCHAR(100) NOT NULL,
+    revision INT NOT NULL,
+    schema_json JSONB NOT NULL,
+    published_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by VARCHAR(100),
+
+    CONSTRAINT pk_tracking_plan_revisions
+        PRIMARY KEY (tracking_plan_id, revision),
+
+    CONSTRAINT fk_tracking_plan_revisions_plan
+        FOREIGN KEY (tracking_plan_id) REFERENCES tracking_plans (tracking_plan_id),
+
+    CONSTRAINT chk_tracking_plan_revisions_revision
+        CHECK (revision >= 1),
+
+    CONSTRAINT chk_tracking_plan_revisions_schema_object
+        CHECK (jsonb_typeof(schema_json) = 'object')
+);
+
+CREATE INDEX IF NOT EXISTS idx_tracking_plan_revisions_published_at
+ON tracking_plan_revisions (tracking_plan_id, published_at DESC);
+
+CREATE OR REPLACE FUNCTION prevent_tracking_plan_revision_mutation()
+RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'published tracking plan revisions are immutable';
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_tracking_plan_revisions_immutable ON tracking_plan_revisions;
+CREATE TRIGGER trg_tracking_plan_revisions_immutable
+BEFORE UPDATE OR DELETE ON tracking_plan_revisions
+FOR EACH ROW EXECUTE FUNCTION prevent_tracking_plan_revision_mutation();
+
+CREATE TABLE IF NOT EXISTS tracking_plan_events (
+    tracking_plan_id VARCHAR(100) NOT NULL,
+    event_name VARCHAR(100) NOT NULL,
+    description TEXT,
+    status VARCHAR(50) NOT NULL DEFAULT 'draft',
+    properties_schema_json JSONB NOT NULL DEFAULT '{"type":"object","properties":{},"required":[]}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT pk_tracking_plan_events
+        PRIMARY KEY (tracking_plan_id, event_name),
+
+    CONSTRAINT fk_tracking_plan_events_plan
+        FOREIGN KEY (tracking_plan_id) REFERENCES tracking_plans (tracking_plan_id),
+
+    CONSTRAINT chk_tracking_plan_events_name
+        CHECK (btrim(event_name) <> ''),
+
+    CONSTRAINT chk_tracking_plan_events_status
+        CHECK (status IN ('draft', 'system', 'archived')),
+
+    CONSTRAINT chk_tracking_plan_events_schema_object
+        CHECK (jsonb_typeof(properties_schema_json) = 'object')
+);
+
+CREATE INDEX IF NOT EXISTS idx_tracking_plan_events_plan_status
+ON tracking_plan_events (tracking_plan_id, status);
+
+CREATE TABLE IF NOT EXISTS project_sdk_settings (
+    project_id VARCHAR(100) PRIMARY KEY,
+    allowed_origins_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    published_tracking_plan_id VARCHAR(100),
+    published_revision INT,
+    status VARCHAR(50) NOT NULL DEFAULT 'active',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT fk_project_sdk_settings_project
+        FOREIGN KEY (project_id) REFERENCES projects (project_id),
+
+    CONSTRAINT fk_project_sdk_settings_published_revision
+        FOREIGN KEY (published_tracking_plan_id, published_revision)
+        REFERENCES tracking_plan_revisions (tracking_plan_id, revision),
+
+    CONSTRAINT chk_project_sdk_settings_origins_array
+        CHECK (jsonb_typeof(allowed_origins_json) = 'array'),
+
+    CONSTRAINT chk_project_sdk_settings_published_pair
+        CHECK (
+            (published_tracking_plan_id IS NULL AND published_revision IS NULL)
+            OR
+            (published_tracking_plan_id IS NOT NULL AND published_revision IS NOT NULL)
+        ),
+
+    CONSTRAINT chk_project_sdk_settings_status
+        CHECK (status IN ('active', 'disabled'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_sdk_settings_published_revision
+ON project_sdk_settings (published_tracking_plan_id, published_revision);
 
 COMMIT;
