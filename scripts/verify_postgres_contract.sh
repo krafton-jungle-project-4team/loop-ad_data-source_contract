@@ -235,7 +235,7 @@ psql_file \
     "${FRESH_DB}" \
     "${ROOT_DIR}/postgres/tests/verify_segment_audience_allocation.sql"
 
-log "verifying Segment Audience allocation migration from ${REQUESTED_BASE_REF}"
+log "verifying Segment Audience v1.9 -> v1.10 allocation migration from ${REQUESTED_BASE_REF}"
 psql_git_file \
     "${AUDIENCE_LEGACY_DB}" \
     "${REQUESTED_BASE_REF}" \
@@ -306,16 +306,53 @@ SELECT (
     NOT EXISTS (
         SELECT 1
         FROM promotion_target_segments
-        WHERE source_audience_snapshot_id IS NOT NULL
-           OR audience_snapshot_id IS NOT NULL
+        WHERE audience_snapshot_id IS NOT NULL
+           OR allocation_plan_id IS NOT NULL
+           OR audience_reservation_state IS NOT NULL
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM promotion_run_target_bindings
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM promotion_audience_exclusion_members
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM promotion_audience_exclusion_state
     )
     AND NOT EXISTS (
         SELECT 1
-        FROM promotion_runs
-        WHERE audience_allocation_plan_id IS NOT NULL
+        FROM pg_class
+        WHERE relname IN (
+            'segment_audience_allocation_plan_segments',
+            'segment_audience_allocation_members',
+            'segment_audience_allocation_previews',
+            'segment_audience_allocation_preview_targets',
+            'promotion_audience_exclusion_revisions',
+            'promotion_audience_exclusion_events',
+            'promotion_run_target_audience_bindings'
+        )
+          AND relkind IN ('r', 'p', 'v', 'm')
     )
 )::int;
 " '1'
+
+log 'confirming pre-release allocation drafts fail instead of being rewritten'
+psql_query "${AUDIENCE_LEGACY_DB}" "
+CREATE TABLE segment_audience_allocation_members (
+    allocation_plan_id UUID NOT NULL,
+    user_id VARCHAR(255) NOT NULL
+);
+" >/dev/null
+
+if psql_file \
+    "${AUDIENCE_LEGACY_DB}" \
+    "${ROOT_DIR}/postgres/expand_segment_audience_allocation.sql"; then
+    printf 'allocation migration unexpectedly accepted a pre-release draft\n' >&2
+    exit 1
+fi
+
+psql_query "${AUDIENCE_LEGACY_DB}" \
+    'DROP TABLE segment_audience_allocation_members;' >/dev/null
 
 psql_file \
     "${AUDIENCE_LEGACY_DB}" \
@@ -337,7 +374,10 @@ normalized_schema_dump() {
 fresh_audience_schema="$(normalized_schema_dump "${FRESH_DB}")"
 migrated_audience_schema="$(normalized_schema_dump "${AUDIENCE_LEGACY_DB}")"
 if [[ "${fresh_audience_schema}" != "${migrated_audience_schema}" ]]; then
-    printf 'fresh and migrated Segment Audience allocation schemas differ\n' >&2
+    printf 'fresh and migrated Segment Audience v1.10 schemas differ\n' >&2
+    diff -u \
+        <(printf '%s\n' "${fresh_audience_schema}") \
+        <(printf '%s\n' "${migrated_audience_schema}") >&2 || true
     exit 1
 fi
 
