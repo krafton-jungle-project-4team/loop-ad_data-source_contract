@@ -266,6 +266,27 @@ ORDER BY (
 );
 
 -- =========================================================
+-- 5B. Materialized View: User Behavior Vectors -> Revisions
+-- Every future insert into the latest table is preserved as a new revision.
+-- Existing rows are intentionally not backfilled by this canonical DDL.
+-- =========================================================
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_user_behavior_vectors_to_revisions
+TO user_behavior_vector_revisions AS
+SELECT
+    project_id,
+    user_id,
+    vector_dim,
+    vector_values,
+    vector_version,
+    source,
+    window_start,
+    window_end,
+    updated_at,
+    toString(generateUUIDv4()) AS vector_row_id,
+    now64(6, 'UTC') AS ingested_at
+FROM user_behavior_vectors;
+
+-- =========================================================
 -- 6. Event Validation Errors
 -- Collector writes invalid payloads here or equivalent Postgres table.
 -- =========================================================
