@@ -1,5 +1,5 @@
 -- =========================================================
--- Loop-Ad ClickHouse Schema Contract v1.6
+-- Loop-Ad ClickHouse Schema Contract v1.7
 -- Owner: loop-ad_data-source_contract
 -- Domain: hotel / accommodation booking
 --
@@ -10,6 +10,7 @@
 --   - hotel profile views
 --   - funnel/segment-query support views
 --   - 64-dimensional user behavior vectors
+--   - append-only user behavior vector revisions
 -- =========================================================
 
 CREATE DATABASE IF NOT EXISTS loopad;
@@ -234,6 +235,35 @@ CREATE TABLE IF NOT EXISTS user_behavior_vectors
 )
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (project_id, user_id, vector_version);
+
+-- =========================================================
+-- 5A. User Behavior Vector Revisions
+-- Append-only source used to reproduce immutable PostgreSQL generations.
+-- =========================================================
+CREATE TABLE IF NOT EXISTS user_behavior_vector_revisions
+(
+    project_id String,
+    user_id String,
+    vector_dim UInt16,
+    vector_values Array(Float32),
+    vector_version String,
+    source LowCardinality(String),
+    window_start DateTime64(3, 'UTC'),
+    window_end DateTime64(3, 'UTC'),
+    updated_at DateTime64(3, 'UTC'),
+    vector_row_id String,
+    ingested_at DateTime64(6, 'UTC') DEFAULT now64(6, 'UTC')
+)
+ENGINE = MergeTree
+ORDER BY (
+    project_id,
+    vector_version,
+    window_start,
+    window_end,
+    user_id,
+    ingested_at,
+    vector_row_id
+);
 
 -- =========================================================
 -- 6. Event Validation Errors
