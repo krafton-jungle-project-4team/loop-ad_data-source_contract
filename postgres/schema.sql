@@ -1,6 +1,6 @@
 -- =========================================================
 -- Loop-Ad PostgreSQL Schema Contract v1.10
--- Draft: promotion scope, Generation v1, and Segment Audience allocation contracts
+-- Draft: promotion scope, Generation v1, and lean Segment Audience allocation contracts
 -- Owner: loop-ad_data-source_contract
 -- Domain: hotel / accommodation booking
 --
@@ -749,7 +749,10 @@ CREATE TABLE IF NOT EXISTS promotion_analyses (
         FOREIGN KEY (promotion_id) REFERENCES promotions (promotion_id),
 
     CONSTRAINT chk_promotion_analyses_status
-        CHECK (status IN ('requested', 'running', 'completed', 'failed'))
+        CHECK (status IN ('requested', 'running', 'completed', 'failed')),
+
+    CONSTRAINT uq_promotion_analyses_promotion_identity
+        UNIQUE (analysis_id, promotion_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_promotion_analyses_project_id
@@ -1248,14 +1251,6 @@ CREATE TABLE IF NOT EXISTS promotion_runs (
     ended_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    audience_allocation_plan_id VARCHAR(100),
-    audience_allocation_plan_status VARCHAR(50)
-        GENERATED ALWAYS AS (
-            CASE
-                WHEN audience_allocation_plan_id IS NULL THEN NULL
-                ELSE 'locked'
-            END
-        ) STORED,
 
     CONSTRAINT fk_promotion_runs_project
         FOREIGN KEY (project_id) REFERENCES projects (project_id),
@@ -1386,145 +1381,134 @@ ON segment_vectors USING hnsw (embedding vector_cosine_ops);
 
 -- =========================================================
 -- 12A. Segment Audience Allocation Plans
--- Auditable selection-level allocation identity. Source snapshots remain
--- immutable; final allocation snapshots are versioned by plan.
+-- One immutable confirmation action containing one to three segments.
 -- =========================================================
+CREATE OR REPLACE FUNCTION is_valid_selected_segment_ids_json(
+    p_selected_segment_ids_json JSONB
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+PARALLEL SAFE
+AS $$
+DECLARE
+    item JSONB;
+    segment_id_value TEXT;
+    seen_segment_ids TEXT[] := ARRAY[]::TEXT[];
+    canonical_segment_ids JSONB;
+BEGIN
+    IF jsonb_typeof(p_selected_segment_ids_json) <> 'array'
+       OR jsonb_array_length(p_selected_segment_ids_json) NOT BETWEEN 1 AND 3 THEN
+        RETURN false;
+    END IF;
+
+    FOR item IN
+        SELECT value
+        FROM jsonb_array_elements(p_selected_segment_ids_json) AS items(value)
+    LOOP
+        IF jsonb_typeof(item) <> 'string' THEN
+            RETURN false;
+        END IF;
+
+        segment_id_value := item #>> '{}';
+        IF btrim(segment_id_value) = ''
+           OR segment_id_value <> btrim(segment_id_value)
+           OR segment_id_value = ANY(seen_segment_ids) THEN
+            RETURN false;
+        END IF;
+
+        seen_segment_ids := array_append(seen_segment_ids, segment_id_value);
+    END LOOP;
+
+    SELECT jsonb_agg(to_jsonb(value) ORDER BY value COLLATE "C")
+    INTO canonical_segment_ids
+    FROM unnest(seen_segment_ids) AS values(value);
+
+    RETURN p_selected_segment_ids_json = canonical_segment_ids;
+END
+$$;
+
 CREATE TABLE IF NOT EXISTS segment_audience_allocation_plans (
-    allocation_plan_id VARCHAR(100) PRIMARY KEY,
-    project_id VARCHAR(100) NOT NULL,
-    campaign_id VARCHAR(100) NOT NULL,
+    allocation_plan_id UUID PRIMARY KEY,
     promotion_id VARCHAR(100) NOT NULL,
-    recommendation_analysis_id VARCHAR(100) NOT NULL,
-    selection_signature VARCHAR(255) NOT NULL,
-    allocation_policy_id VARCHAR(100) NOT NULL,
+    candidate_batch_analysis_id VARCHAR(100) NOT NULL,
+    target_analysis_id VARCHAR(100) NOT NULL,
+    selection_fingerprint VARCHAR(128) NOT NULL,
+    selected_segment_ids_json JSONB NOT NULL,
+    exclusion_revision BIGINT NOT NULL,
     allocation_policy_version VARCHAR(100) NOT NULL,
     allocation_policy_hash VARCHAR(128) NOT NULL,
-    status VARCHAR(50) NOT NULL DEFAULT 'draft',
+    status VARCHAR(50) NOT NULL DEFAULT 'finalized',
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    finalized_at TIMESTAMPTZ,
-    superseded_at TIMESTAMPTZ,
-
-    CONSTRAINT fk_segment_audience_allocation_plans_project
-        FOREIGN KEY (project_id) REFERENCES projects (project_id),
-
-    CONSTRAINT fk_segment_audience_allocation_plans_campaign
-        FOREIGN KEY (campaign_id) REFERENCES campaigns (campaign_id),
+    locked_at TIMESTAMPTZ,
+    released_at TIMESTAMPTZ,
 
     CONSTRAINT fk_segment_audience_allocation_plans_promotion
         FOREIGN KEY (promotion_id) REFERENCES promotions (promotion_id),
 
-    CONSTRAINT fk_segment_audience_allocation_plans_analysis
-        FOREIGN KEY (recommendation_analysis_id)
-        REFERENCES promotion_analyses (analysis_id),
+    CONSTRAINT fk_segment_audience_allocation_plans_candidate_analysis
+        FOREIGN KEY (candidate_batch_analysis_id, promotion_id)
+        REFERENCES promotion_analyses (analysis_id, promotion_id),
+
+    CONSTRAINT fk_segment_audience_allocation_plans_target_analysis
+        FOREIGN KEY (target_analysis_id, promotion_id)
+        REFERENCES promotion_analyses (analysis_id, promotion_id),
 
     CONSTRAINT chk_segment_audience_allocation_plans_status
-        CHECK (status IN ('draft', 'finalized', 'superseded', 'locked')),
+        CHECK (status IN ('finalized', 'locked', 'released')),
 
     CONSTRAINT chk_segment_audience_allocation_plans_identifiers
         CHECK (
-            btrim(selection_signature) <> ''
-            AND btrim(allocation_policy_id) <> ''
+            btrim(selection_fingerprint) <> ''
+            AND exclusion_revision >= 1
             AND btrim(allocation_policy_version) <> ''
             AND btrim(allocation_policy_hash) <> ''
         ),
 
+    CONSTRAINT chk_segment_audience_allocation_plans_selected_segments
+        CHECK (is_valid_selected_segment_ids_json(selected_segment_ids_json)),
+
     CONSTRAINT chk_segment_audience_allocation_plans_lifecycle
         CHECK (
             (
-                status = 'draft'
-                AND finalized_at IS NULL
-                AND superseded_at IS NULL
+                status = 'finalized'
+                AND locked_at IS NULL
+                AND released_at IS NULL
             )
             OR (
-                status IN ('finalized', 'locked')
-                AND finalized_at IS NOT NULL
-                AND superseded_at IS NULL
+                status = 'locked'
+                AND locked_at IS NOT NULL
+                AND released_at IS NULL
             )
             OR (
-                status = 'superseded'
-                AND superseded_at IS NOT NULL
-                AND (
-                    finalized_at IS NULL
-                    OR finalized_at <= superseded_at
-                )
+                status = 'released'
+                AND locked_at IS NULL
+                AND released_at IS NOT NULL
             )
         ),
 
-    CONSTRAINT uq_segment_audience_allocation_plans_identity
+    CONSTRAINT uq_segment_audience_allocation_plans_selection
+        UNIQUE (candidate_batch_analysis_id, selection_fingerprint),
+
+    CONSTRAINT uq_segment_audience_allocation_plans_target_identity
         UNIQUE (
             allocation_plan_id,
-            project_id,
-            campaign_id,
-            promotion_id,
-            recommendation_analysis_id
+            target_analysis_id,
+            promotion_id
         ),
 
     CONSTRAINT uq_segment_audience_allocation_plans_status
         UNIQUE (allocation_plan_id, status)
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_segment_audience_allocation_plans_active
-ON segment_audience_allocation_plans (promotion_id)
-WHERE status IN ('draft', 'finalized');
-
-CREATE INDEX IF NOT EXISTS idx_segment_audience_allocation_plans_analysis_selection
-ON segment_audience_allocation_plans (
-    recommendation_analysis_id,
-    selection_signature
-);
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_constraint
-        WHERE conrelid = 'promotion_runs'::regclass
-          AND conname = 'fk_promotion_runs_audience_allocation_plan_identity'
-    ) THEN
-        ALTER TABLE promotion_runs
-            ADD CONSTRAINT fk_promotion_runs_audience_allocation_plan_identity
-            FOREIGN KEY (
-                audience_allocation_plan_id,
-                project_id,
-                campaign_id,
-                promotion_id,
-                analysis_id
-            )
-            REFERENCES segment_audience_allocation_plans (
-                allocation_plan_id,
-                project_id,
-                campaign_id,
-                promotion_id,
-                recommendation_analysis_id
-            );
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_constraint
-        WHERE conrelid = 'promotion_runs'::regclass
-          AND conname = 'fk_promotion_runs_audience_allocation_plan_locked'
-    ) THEN
-        ALTER TABLE promotion_runs
-            ADD CONSTRAINT fk_promotion_runs_audience_allocation_plan_locked
-            FOREIGN KEY (
-                audience_allocation_plan_id,
-                audience_allocation_plan_status
-            )
-            REFERENCES segment_audience_allocation_plans (
-                allocation_plan_id,
-                status
-            );
-    END IF;
-END
-$$;
-
-CREATE INDEX IF NOT EXISTS idx_promotion_runs_audience_allocation_plan_id
-ON promotion_runs (audience_allocation_plan_id);
+CREATE INDEX IF NOT EXISTS idx_segment_audience_allocation_plans_promotion
+ON segment_audience_allocation_plans (promotion_id, created_at);
 
 -- =========================================================
 -- 12B. Segment Audience Snapshots
--- Append-only audience resolution output managed by Decision.
+-- Source and final audience outputs. Members live only in
+-- segment_audience_members.
 -- =========================================================
 CREATE TABLE IF NOT EXISTS segment_audience_snapshots (
     snapshot_id VARCHAR(100) PRIMARY KEY,
@@ -1569,14 +1553,9 @@ CREATE TABLE IF NOT EXISTS segment_audience_snapshots (
     status VARCHAR(50) NOT NULL DEFAULT 'completed',
     metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    snapshot_role VARCHAR(50) NOT NULL DEFAULT 'source_candidate',
+    snapshot_kind VARCHAR(50) NOT NULL DEFAULT 'source',
     source_snapshot_id VARCHAR(100),
-    allocation_plan_id VARCHAR(100),
-    allocation_policy_id VARCHAR(100),
-    allocation_policy_version VARCHAR(100),
-    allocation_policy_hash VARCHAR(128),
-    targetable BOOLEAN
-        GENERATED ALWAYS AS (final_user_count > 0) STORED,
+    allocation_plan_id UUID,
 
     CONSTRAINT fk_segment_audience_snapshots_analysis
         FOREIGN KEY (analysis_id) REFERENCES promotion_analyses (analysis_id),
@@ -1619,17 +1598,13 @@ CREATE TABLE IF NOT EXISTS segment_audience_snapshots (
     CONSTRAINT fk_segment_audience_snapshots_allocation_plan_identity
         FOREIGN KEY (
             allocation_plan_id,
-            project_id,
-            campaign_id,
-            promotion_id,
-            analysis_id
+            analysis_id,
+            promotion_id
         )
         REFERENCES segment_audience_allocation_plans (
             allocation_plan_id,
-            project_id,
-            campaign_id,
-            promotion_id,
-            recommendation_analysis_id
+            target_analysis_id,
+            promotion_id
         ),
 
     CONSTRAINT chk_segment_audience_snapshots_eligible_count
@@ -1663,27 +1638,21 @@ CREATE TABLE IF NOT EXISTS segment_audience_snapshots (
     CONSTRAINT chk_segment_audience_snapshots_status
         CHECK (status = 'completed'),
 
-    CONSTRAINT chk_segment_audience_snapshots_role
-        CHECK (snapshot_role IN ('source_candidate', 'final_allocation')),
+    CONSTRAINT chk_segment_audience_snapshots_kind
+        CHECK (snapshot_kind IN ('source', 'final')),
 
     CONSTRAINT chk_segment_audience_snapshots_allocation_identity
         CHECK (
             (
-                snapshot_role = 'source_candidate'
+                snapshot_kind = 'source'
                 AND source_snapshot_id IS NULL
                 AND allocation_plan_id IS NULL
-                AND allocation_policy_id IS NULL
-                AND allocation_policy_version IS NULL
-                AND allocation_policy_hash IS NULL
             )
             OR (
-                snapshot_role = 'final_allocation'
+                snapshot_kind = 'final'
                 AND source_snapshot_id IS NOT NULL
                 AND source_snapshot_id <> snapshot_id
                 AND allocation_plan_id IS NOT NULL
-                AND allocation_policy_id IS NOT NULL
-                AND allocation_policy_version IS NOT NULL
-                AND allocation_policy_hash IS NOT NULL
             )
         ),
 
@@ -1696,8 +1665,17 @@ CREATE TABLE IF NOT EXISTS segment_audience_snapshots (
             segment_id
         ),
 
-    CONSTRAINT uq_segment_audience_snapshots_plan_source
-        UNIQUE (allocation_plan_id, source_snapshot_id, snapshot_id)
+    CONSTRAINT uq_segment_audience_snapshots_target_binding
+        UNIQUE (
+            snapshot_id,
+            analysis_id,
+            promotion_id,
+            segment_id,
+            allocation_plan_id
+        ),
+
+    CONSTRAINT uq_segment_audience_snapshots_plan_segment
+        UNIQUE (allocation_plan_id, segment_id)
 );
 
 CREATE TABLE IF NOT EXISTS segment_audience_members (
@@ -1772,7 +1750,8 @@ CREATE TABLE IF NOT EXISTS promotion_target_segments (
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     audience_snapshot_id VARCHAR(100),
-    source_audience_snapshot_id VARCHAR(100),
+    allocation_plan_id UUID,
+    audience_reservation_state VARCHAR(50),
 
     CONSTRAINT fk_promotion_target_segments_analysis
         FOREIGN KEY (analysis_id) REFERENCES promotion_analyses (analysis_id),
@@ -1793,55 +1772,89 @@ CREATE TABLE IF NOT EXISTS promotion_target_segments (
         FOREIGN KEY (segment_vector_id) REFERENCES segment_vectors (segment_vector_id),
 
     CONSTRAINT fk_promotion_target_segments_suggestion
-        FOREIGN KEY (suggestion_id) REFERENCES promotion_segment_suggestions (suggestion_id),
+        FOREIGN KEY (suggestion_id)
+        REFERENCES promotion_segment_suggestions (suggestion_id),
 
     CONSTRAINT fk_promotion_target_segments_audience_snapshot
-        FOREIGN KEY (audience_snapshot_id) REFERENCES segment_audience_snapshots (snapshot_id),
+        FOREIGN KEY (audience_snapshot_id)
+        REFERENCES segment_audience_snapshots (snapshot_id),
 
-    CONSTRAINT fk_promotion_target_segments_source_snapshot_identity
-        FOREIGN KEY (
-            source_audience_snapshot_id,
-            project_id,
-            campaign_id,
-            promotion_id,
-            segment_id
-        )
-        REFERENCES segment_audience_snapshots (
-            snapshot_id,
-            project_id,
-            campaign_id,
-            promotion_id,
-            segment_id
+    CONSTRAINT fk_promotion_target_segments_allocation_plan_identity
+        FOREIGN KEY (allocation_plan_id, analysis_id, promotion_id)
+        REFERENCES segment_audience_allocation_plans (
+            allocation_plan_id,
+            target_analysis_id,
+            promotion_id
         ),
 
     CONSTRAINT fk_promotion_target_segments_final_snapshot_identity
         FOREIGN KEY (
             audience_snapshot_id,
-            project_id,
-            campaign_id,
+            analysis_id,
             promotion_id,
-            segment_id
+            segment_id,
+            allocation_plan_id
         )
         REFERENCES segment_audience_snapshots (
             snapshot_id,
-            project_id,
-            campaign_id,
+            analysis_id,
             promotion_id,
-            segment_id
+            segment_id,
+            allocation_plan_id
         ),
+
+    CONSTRAINT chk_promotion_target_segments_estimated_size
+        CHECK (estimated_size >= 0),
 
     CONSTRAINT chk_promotion_target_segments_priority
         CHECK (priority IS NULL OR priority IN ('low', 'medium', 'high')),
 
     CONSTRAINT chk_promotion_target_segments_status
-        CHECK (status IN ('planned', 'content_ready', 'approved', 'running', 'goal_met', 'goal_not_met', 'insufficient_data', 'stopped')),
+        CHECK (status IN (
+            'planned',
+            'content_ready',
+            'approved',
+            'running',
+            'goal_met',
+            'goal_not_met',
+            'insufficient_data',
+            'stopped'
+        )),
 
-    CONSTRAINT chk_promotion_target_segments_estimated_size
-        CHECK (estimated_size >= 0),
+    CONSTRAINT chk_promotion_target_segments_reservation_state
+        CHECK (
+            audience_reservation_state IS NULL
+            OR audience_reservation_state IN ('reserved', 'consumed', 'released')
+        ),
+
+    CONSTRAINT chk_promotion_target_segments_audience_binding
+        CHECK (
+            (
+                audience_snapshot_id IS NULL
+                AND allocation_plan_id IS NULL
+                AND audience_reservation_state IS NULL
+            )
+            OR (
+                audience_snapshot_id IS NOT NULL
+                AND allocation_plan_id IS NOT NULL
+                AND audience_reservation_state IS NOT NULL
+            )
+        ),
 
     CONSTRAINT uq_promotion_target_segments_analysis_segment
-        UNIQUE (analysis_id, segment_id)
+        UNIQUE (analysis_id, segment_id),
+
+    CONSTRAINT uq_promotion_target_segments_audience_binding
+        UNIQUE (
+            analysis_id,
+            segment_id,
+            allocation_plan_id,
+            audience_snapshot_id
+        )
 );
+
+CREATE INDEX IF NOT EXISTS idx_promotion_target_segments_analysis_id
+ON promotion_target_segments (analysis_id);
 
 CREATE INDEX IF NOT EXISTS idx_promotion_target_segments_promotion_id
 ON promotion_target_segments (promotion_id);
@@ -1849,324 +1862,856 @@ ON promotion_target_segments (promotion_id);
 CREATE INDEX IF NOT EXISTS idx_promotion_target_segments_segment_id
 ON promotion_target_segments (segment_id);
 
-CREATE INDEX IF NOT EXISTS idx_promotion_target_segments_analysis_id
-ON promotion_target_segments (analysis_id);
-
 CREATE INDEX IF NOT EXISTS idx_promotion_target_segments_suggestion_id
 ON promotion_target_segments (suggestion_id);
 
-CREATE INDEX IF NOT EXISTS idx_promotion_target_segments_source_audience_snapshot_id
-ON promotion_target_segments (source_audience_snapshot_id);
+CREATE INDEX IF NOT EXISTS idx_promotion_target_segments_allocation_plan_id
+ON promotion_target_segments (allocation_plan_id);
 
 -- =========================================================
--- 13A. Segment Audience Allocation Targets / Members
--- One user can belong to only one target within an allocation plan.
+-- 13A. Promotion Audience Exclusion State
+-- PostgreSQL is authoritative. A promotion row is locked and advanced once
+-- per confirmation, run binding, or whole-plan release transaction.
 -- =========================================================
-CREATE TABLE IF NOT EXISTS segment_audience_allocation_plan_targets (
-    allocation_plan_id VARCHAR(100) NOT NULL,
-    target_segment_id BIGINT NOT NULL,
-    source_snapshot_id VARCHAR(100) NOT NULL,
+CREATE TABLE IF NOT EXISTS promotion_audience_exclusion_state (
+    promotion_id VARCHAR(100) PRIMARY KEY,
+    revision BIGINT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT fk_promotion_audience_exclusion_state_promotion
+        FOREIGN KEY (promotion_id) REFERENCES promotions (promotion_id),
+
+    CONSTRAINT chk_promotion_audience_exclusion_state_revision
+        CHECK (revision >= 0)
+);
+
+CREATE OR REPLACE FUNCTION advance_promotion_audience_exclusion_revision(
+    p_promotion_id VARCHAR(100)
+)
+RETURNS BIGINT
+LANGUAGE plpgsql
+VOLATILE
+AS $$
+DECLARE
+    next_revision BIGINT;
+BEGIN
+    INSERT INTO promotion_audience_exclusion_state (
+        promotion_id,
+        revision
+    ) VALUES (
+        p_promotion_id,
+        0
+    )
+    ON CONFLICT (promotion_id) DO NOTHING;
+
+    PERFORM 1
+    FROM promotion_audience_exclusion_state
+    WHERE promotion_id = p_promotion_id
+    FOR UPDATE;
+
+    UPDATE promotion_audience_exclusion_state
+    SET revision = revision + 1,
+        updated_at = now()
+    WHERE promotion_id = p_promotion_id
+    RETURNING revision INTO next_revision;
+
+    RETURN next_revision;
+END
+$$;
+
+CREATE TABLE IF NOT EXISTS promotion_audience_exclusion_members (
+    project_id VARCHAR(100) NOT NULL,
+    promotion_id VARCHAR(100) NOT NULL,
+    user_id VARCHAR(255) NOT NULL,
+    target_analysis_id VARCHAR(100) NOT NULL,
+    segment_id VARCHAR(100) NOT NULL,
+    allocation_plan_id UUID NOT NULL,
     final_snapshot_id VARCHAR(100) NOT NULL,
-    template_id VARCHAR(100) NOT NULL,
-    template_version VARCHAR(100) NOT NULL,
-    template_hash VARCHAR(128) NOT NULL,
-    allocation_priority INT NOT NULL,
-    final_user_count INT NOT NULL,
-    audience_status VARCHAR(50) NOT NULL,
-    targetable BOOLEAN NOT NULL,
+    state VARCHAR(50) NOT NULL,
+    revision BIGINT NOT NULL,
+    reserved_at TIMESTAMPTZ NOT NULL,
+    consumed_at TIMESTAMPTZ,
+    released_at TIMESTAMPTZ,
 
-    CONSTRAINT pk_segment_audience_allocation_plan_targets
-        PRIMARY KEY (allocation_plan_id, target_segment_id),
+    CONSTRAINT pk_promotion_audience_exclusion_members
+        PRIMARY KEY (project_id, promotion_id, user_id),
 
-    CONSTRAINT fk_segment_audience_allocation_plan_targets_plan
+    CONSTRAINT fk_promotion_audience_exclusion_members_project
+        FOREIGN KEY (project_id) REFERENCES projects (project_id),
+
+    CONSTRAINT fk_promotion_audience_exclusion_members_promotion
+        FOREIGN KEY (promotion_id) REFERENCES promotions (promotion_id),
+
+    CONSTRAINT fk_promotion_audience_exclusion_members_target_binding
+        FOREIGN KEY (
+            target_analysis_id,
+            segment_id,
+            allocation_plan_id,
+            final_snapshot_id
+        )
+        REFERENCES promotion_target_segments (
+            analysis_id,
+            segment_id,
+            allocation_plan_id,
+            audience_snapshot_id
+        ),
+
+    CONSTRAINT chk_promotion_audience_exclusion_members_state
+        CHECK (state IN ('reserved', 'consumed', 'released')),
+
+    CONSTRAINT chk_promotion_audience_exclusion_members_revision
+        CHECK (revision >= 1),
+
+    CONSTRAINT chk_promotion_audience_exclusion_members_timestamps
+        CHECK (
+            (
+                state = 'reserved'
+                AND consumed_at IS NULL
+                AND released_at IS NULL
+            )
+            OR (
+                state = 'consumed'
+                AND consumed_at IS NOT NULL
+                AND released_at IS NULL
+            )
+            OR (
+                state = 'released'
+                AND consumed_at IS NULL
+                AND released_at IS NOT NULL
+            )
+        )
+);
+
+CREATE INDEX IF NOT EXISTS idx_promotion_audience_exclusion_members_active
+ON promotion_audience_exclusion_members (
+    project_id,
+    promotion_id,
+    state,
+    user_id
+);
+
+CREATE INDEX IF NOT EXISTS idx_promotion_audience_exclusion_members_plan_segment
+ON promotion_audience_exclusion_members (
+    allocation_plan_id,
+    segment_id,
+    state
+);
+
+CREATE INDEX IF NOT EXISTS idx_promotion_audience_exclusion_members_final_snapshot
+ON promotion_audience_exclusion_members (final_snapshot_id);
+
+-- =========================================================
+-- 13B. Promotion Run Target Bindings
+-- Every binding in a run shares the run row's analysis and generation.
+-- =========================================================
+CREATE TABLE IF NOT EXISTS promotion_run_target_bindings (
+    promotion_run_id VARCHAR(100) NOT NULL,
+    target_analysis_id VARCHAR(100) NOT NULL,
+    segment_id VARCHAR(100) NOT NULL,
+    allocation_plan_id UUID NOT NULL,
+    final_snapshot_id VARCHAR(100) NOT NULL,
+    bound_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT pk_promotion_run_target_bindings
+        PRIMARY KEY (promotion_run_id, segment_id),
+
+    CONSTRAINT uq_promotion_run_target_bindings_target
+        UNIQUE (target_analysis_id, segment_id),
+
+    CONSTRAINT fk_promotion_run_target_bindings_run
+        FOREIGN KEY (promotion_run_id)
+        REFERENCES promotion_runs (promotion_run_id),
+
+    CONSTRAINT fk_promotion_run_target_bindings_plan
         FOREIGN KEY (allocation_plan_id)
         REFERENCES segment_audience_allocation_plans (allocation_plan_id),
 
-    CONSTRAINT fk_segment_audience_allocation_plan_targets_target
-        FOREIGN KEY (target_segment_id)
-        REFERENCES promotion_target_segments (id),
+    CONSTRAINT fk_promotion_run_target_bindings_final_snapshot
+        FOREIGN KEY (final_snapshot_id)
+        REFERENCES segment_audience_snapshots (snapshot_id),
 
-    CONSTRAINT fk_segment_audience_allocation_plan_targets_snapshot_binding
+    CONSTRAINT fk_promotion_run_target_bindings_target_binding
         FOREIGN KEY (
+            target_analysis_id,
+            segment_id,
             allocation_plan_id,
-            source_snapshot_id,
             final_snapshot_id
         )
-        REFERENCES segment_audience_snapshots (
+        REFERENCES promotion_target_segments (
+            analysis_id,
+            segment_id,
             allocation_plan_id,
-            source_snapshot_id,
-            snapshot_id
-        ),
-
-    CONSTRAINT chk_segment_audience_allocation_plan_targets_template
-        CHECK (
-            btrim(template_id) <> ''
-            AND btrim(template_version) <> ''
-            AND btrim(template_hash) <> ''
-        ),
-
-    CONSTRAINT chk_segment_audience_allocation_plan_targets_priority
-        CHECK (allocation_priority >= 1),
-
-    CONSTRAINT chk_segment_audience_allocation_plan_targets_final_count
-        CHECK (final_user_count >= 0),
-
-    CONSTRAINT chk_segment_audience_allocation_plan_targets_audience_status
-        CHECK (audience_status IN (
-            'no_eligible_audience',
-            'insufficient_sample',
-            'targetable'
-        )),
-
-    CONSTRAINT chk_segment_audience_allocation_plan_targets_targetable
-        CHECK (targetable = (final_user_count > 0)),
-
-    CONSTRAINT uq_segment_audience_allocation_plan_targets_binding
-        UNIQUE (
-            allocation_plan_id,
-            target_segment_id,
-            source_snapshot_id,
-            final_snapshot_id
-        ),
-
-    CONSTRAINT uq_segment_audience_allocation_plan_targets_final_snapshot
-        UNIQUE (allocation_plan_id, final_snapshot_id)
-);
-
-CREATE TABLE IF NOT EXISTS segment_audience_allocation_members (
-    allocation_plan_id VARCHAR(100) NOT NULL,
-    user_id VARCHAR(255) NOT NULL,
-    target_segment_id BIGINT NOT NULL,
-    source_snapshot_id VARCHAR(100) NOT NULL,
-    final_snapshot_id VARCHAR(100) NOT NULL,
-    behavior_fit_score NUMERIC(10, 6),
-    threshold NUMERIC(10, 6) NOT NULL,
-    semantic_margin NUMERIC(10, 6) NOT NULL,
-    normalized_fit NUMERIC(10, 6) NOT NULL,
-    allocation_reason VARCHAR(100) NOT NULL,
-    assigned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-    CONSTRAINT fk_segment_audience_allocation_members_target_binding
-        FOREIGN KEY (
-            allocation_plan_id,
-            target_segment_id,
-            source_snapshot_id,
-            final_snapshot_id
+            audience_snapshot_id
         )
-        REFERENCES segment_audience_allocation_plan_targets (
-            allocation_plan_id,
-            target_segment_id,
-            source_snapshot_id,
-            final_snapshot_id
-        ),
-
-    CONSTRAINT fk_segment_audience_allocation_members_source_member
-        FOREIGN KEY (source_snapshot_id, user_id)
-        REFERENCES segment_audience_members (snapshot_id, user_id),
-
-    CONSTRAINT fk_segment_audience_allocation_members_final_member
-        FOREIGN KEY (final_snapshot_id, user_id)
-        REFERENCES segment_audience_members (snapshot_id, user_id)
-        DEFERRABLE INITIALLY DEFERRED,
-
-    CONSTRAINT chk_segment_audience_allocation_members_score
-        CHECK (
-            behavior_fit_score IS NULL
-            OR (
-                behavior_fit_score >= -1
-                AND behavior_fit_score <= 1
-            )
-        ),
-
-    CONSTRAINT chk_segment_audience_allocation_members_normalized_fit
-        CHECK (normalized_fit >= 0 AND normalized_fit <= 1),
-
-    CONSTRAINT chk_segment_audience_allocation_members_reason
-        CHECK (btrim(allocation_reason) <> ''),
-
-    CONSTRAINT uq_segment_audience_allocation_members_plan_user
-        UNIQUE (allocation_plan_id, user_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_segment_audience_allocation_members_plan_target
-ON segment_audience_allocation_members (
-    allocation_plan_id,
-    target_segment_id
-);
+CREATE INDEX IF NOT EXISTS idx_promotion_run_target_bindings_plan
+ON promotion_run_target_bindings (allocation_plan_id);
 
-CREATE INDEX IF NOT EXISTS idx_segment_audience_allocation_members_target_plan
-ON segment_audience_allocation_members (
-    target_segment_id,
-    allocation_plan_id
-);
+-- =========================================================
+-- 13C. Lean Allocation Lifecycle Validation
+-- =========================================================
+CREATE OR REPLACE FUNCTION enforce_segment_audience_allocation_plan_lifecycle()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'segment audience allocation plans are immutable'
+            USING ERRCODE = '55000';
+    END IF;
 
-CREATE OR REPLACE FUNCTION prevent_locked_audience_allocation_mutation()
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.status <> 'finalized' THEN
+            RAISE EXCEPTION 'new allocation plan must start finalized'
+                USING ERRCODE = '55000';
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    IF ROW(
+        OLD.allocation_plan_id,
+        OLD.promotion_id,
+        OLD.candidate_batch_analysis_id,
+        OLD.target_analysis_id,
+        OLD.selection_fingerprint,
+        OLD.selected_segment_ids_json,
+        OLD.exclusion_revision,
+        OLD.allocation_policy_version,
+        OLD.allocation_policy_hash,
+        OLD.created_at
+    ) IS DISTINCT FROM ROW(
+        NEW.allocation_plan_id,
+        NEW.promotion_id,
+        NEW.candidate_batch_analysis_id,
+        NEW.target_analysis_id,
+        NEW.selection_fingerprint,
+        NEW.selected_segment_ids_json,
+        NEW.exclusion_revision,
+        NEW.allocation_policy_version,
+        NEW.allocation_policy_hash,
+        NEW.created_at
+    ) THEN
+        RAISE EXCEPTION 'allocation plan identity is immutable'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF OLD.status = NEW.status THEN
+        RETURN NEW;
+    END IF;
+
+    IF OLD.status = 'finalized'
+       AND NEW.status IN ('locked', 'released') THEN
+        RETURN NEW;
+    END IF;
+
+    RAISE EXCEPTION 'invalid allocation plan transition: % -> %',
+        OLD.status, NEW.status
+        USING ERRCODE = '55000';
+END
+$$;
+
+CREATE TRIGGER trg_segment_audience_allocation_plan_lifecycle
+BEFORE INSERT OR UPDATE OR DELETE
+ON segment_audience_allocation_plans
+FOR EACH ROW EXECUTE FUNCTION enforce_segment_audience_allocation_plan_lifecycle();
+
+CREATE OR REPLACE FUNCTION enforce_promotion_target_audience_lifecycle()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        IF OLD.allocation_plan_id IS NOT NULL THEN
+            RAISE EXCEPTION 'V2 promotion targets are retained after release'
+                USING ERRCODE = '55000';
+        END IF;
+        RETURN OLD;
+    END IF;
+
+    IF TG_OP = 'INSERT' OR OLD.allocation_plan_id IS NULL THEN
+        IF NEW.allocation_plan_id IS NULL
+           OR NEW.audience_reservation_state = 'reserved' THEN
+            RETURN NEW;
+        END IF;
+        RAISE EXCEPTION 'new V2 target must start reserved'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF ROW(
+        OLD.audience_snapshot_id,
+        OLD.allocation_plan_id
+    ) IS DISTINCT FROM ROW(
+        NEW.audience_snapshot_id,
+        NEW.allocation_plan_id
+    ) THEN
+        RAISE EXCEPTION 'V2 target audience binding is immutable'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF OLD.audience_reservation_state = NEW.audience_reservation_state THEN
+        RETURN NEW;
+    END IF;
+
+    IF OLD.audience_reservation_state = 'reserved'
+       AND NEW.audience_reservation_state IN ('consumed', 'released') THEN
+        RETURN NEW;
+    END IF;
+
+    RAISE EXCEPTION 'invalid target reservation transition: % -> %',
+        OLD.audience_reservation_state,
+        NEW.audience_reservation_state
+        USING ERRCODE = '55000';
+END
+$$;
+
+CREATE TRIGGER trg_promotion_target_audience_lifecycle
+BEFORE INSERT OR UPDATE OR DELETE
+ON promotion_target_segments
+FOR EACH ROW EXECUTE FUNCTION enforce_promotion_target_audience_lifecycle();
+
+CREATE OR REPLACE FUNCTION enforce_promotion_audience_exclusion_member_lifecycle()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    old_plan_id VARCHAR(100);
-    new_plan_id VARCHAR(100);
+    current_revision BIGINT;
+    target_project_id VARCHAR(100);
+    target_promotion_id VARCHAR(100);
 BEGIN
-    IF TG_OP <> 'INSERT' THEN
-        old_plan_id := OLD.allocation_plan_id;
-    END IF;
-
-    IF TG_OP <> 'DELETE' THEN
-        new_plan_id := NEW.allocation_plan_id;
-    END IF;
-
-    IF EXISTS (
-        SELECT 1
-        FROM segment_audience_allocation_plans AS plan
-        WHERE plan.allocation_plan_id IN (old_plan_id, new_plan_id)
-          AND plan.status = 'locked'
-    ) THEN
-        RAISE EXCEPTION
-            'locked audience allocation plan cannot be mutated'
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'promotion audience exclusion members are retained'
             USING ERRCODE = '55000';
     END IF;
 
-    IF TG_OP = 'DELETE' THEN
-        RETURN OLD;
+    SELECT revision
+    INTO current_revision
+    FROM promotion_audience_exclusion_state
+    WHERE promotion_id = NEW.promotion_id;
+
+    IF current_revision IS NULL OR NEW.revision <> current_revision THEN
+        RAISE EXCEPTION
+            'member revision % must equal current promotion revision %',
+            NEW.revision, current_revision
+            USING ERRCODE = '23514';
     END IF;
-    RETURN NEW;
+
+    SELECT project_id, promotion_id
+    INTO target_project_id, target_promotion_id
+    FROM promotion_target_segments
+    WHERE analysis_id = NEW.target_analysis_id
+      AND segment_id = NEW.segment_id;
+
+    IF ROW(NEW.project_id, NEW.promotion_id)
+       IS DISTINCT FROM ROW(target_project_id, target_promotion_id) THEN
+        RAISE EXCEPTION 'exclusion member target scope mismatch'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.state <> 'reserved' THEN
+            RAISE EXCEPTION 'new exclusion member must start reserved'
+                USING ERRCODE = '55000';
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    IF ROW(OLD.project_id, OLD.promotion_id, OLD.user_id)
+       IS DISTINCT FROM ROW(NEW.project_id, NEW.promotion_id, NEW.user_id) THEN
+        RAISE EXCEPTION 'exclusion member identity is immutable'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF NEW.revision <= OLD.revision THEN
+        RAISE EXCEPTION 'exclusion member revision must increase'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF OLD.state = 'reserved'
+       AND NEW.state IN ('consumed', 'released') THEN
+        IF ROW(
+            OLD.target_analysis_id,
+            OLD.segment_id,
+            OLD.allocation_plan_id,
+            OLD.final_snapshot_id,
+            OLD.reserved_at
+        ) IS DISTINCT FROM ROW(
+            NEW.target_analysis_id,
+            NEW.segment_id,
+            NEW.allocation_plan_id,
+            NEW.final_snapshot_id,
+            NEW.reserved_at
+        ) THEN
+            RAISE EXCEPTION 'active reservation binding is immutable'
+                USING ERRCODE = '55000';
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    IF OLD.state = 'released' AND NEW.state = 'reserved' THEN
+        RETURN NEW;
+    END IF;
+
+    RAISE EXCEPTION 'invalid exclusion transition: % -> %',
+        OLD.state, NEW.state
+        USING ERRCODE = '55000';
 END
 $$;
 
-DROP TRIGGER IF EXISTS trg_allocation_plan_targets_locked
-ON segment_audience_allocation_plan_targets;
-CREATE TRIGGER trg_allocation_plan_targets_locked
+CREATE TRIGGER trg_promotion_audience_exclusion_member_lifecycle
 BEFORE INSERT OR UPDATE OR DELETE
-ON segment_audience_allocation_plan_targets
-FOR EACH ROW EXECUTE FUNCTION prevent_locked_audience_allocation_mutation();
+ON promotion_audience_exclusion_members
+FOR EACH ROW EXECUTE FUNCTION enforce_promotion_audience_exclusion_member_lifecycle();
 
-DROP TRIGGER IF EXISTS trg_allocation_members_locked
-ON segment_audience_allocation_members;
-CREATE TRIGGER trg_allocation_members_locked
+CREATE OR REPLACE FUNCTION prevent_final_audience_member_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    affected_snapshot_id VARCHAR(100);
+BEGIN
+    affected_snapshot_id := CASE
+        WHEN TG_OP = 'DELETE' THEN OLD.snapshot_id
+        ELSE NEW.snapshot_id
+    END;
+
+    IF EXISTS (
+        SELECT 1
+        FROM promotion_target_segments
+        WHERE audience_snapshot_id = affected_snapshot_id
+          AND allocation_plan_id IS NOT NULL
+    ) THEN
+        RAISE EXCEPTION 'final audience members are immutable after target binding'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+END
+$$;
+
+CREATE TRIGGER trg_final_audience_member_mutation
 BEFORE INSERT OR UPDATE OR DELETE
-ON segment_audience_allocation_members
-FOR EACH ROW EXECUTE FUNCTION prevent_locked_audience_allocation_mutation();
+ON segment_audience_members
+FOR EACH ROW EXECUTE FUNCTION prevent_final_audience_member_mutation();
 
-CREATE OR REPLACE FUNCTION prevent_locked_target_snapshot_rebinding()
+CREATE OR REPLACE FUNCTION assert_final_audience_snapshot(
+    p_snapshot_id VARCHAR(100)
+)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    snapshot_row segment_audience_snapshots%ROWTYPE;
+    source_kind VARCHAR(50);
+    actual_member_count BIGINT;
+BEGIN
+    SELECT *
+    INTO snapshot_row
+    FROM segment_audience_snapshots
+    WHERE snapshot_id = p_snapshot_id;
+
+    IF NOT FOUND OR snapshot_row.snapshot_kind <> 'final' THEN
+        RETURN;
+    END IF;
+
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(snapshot_row.allocation_plan_id::text, 0)
+    );
+
+    SELECT snapshot_kind
+    INTO source_kind
+    FROM segment_audience_snapshots
+    WHERE snapshot_id = snapshot_row.source_snapshot_id;
+
+    IF source_kind <> 'source' THEN
+        RAISE EXCEPTION 'final snapshot source must be a source snapshot'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT count(*)
+    INTO actual_member_count
+    FROM segment_audience_members
+    WHERE snapshot_id = snapshot_row.snapshot_id;
+
+    IF actual_member_count <> snapshot_row.final_user_count THEN
+        RAISE EXCEPTION
+            'final snapshot member count mismatch: expected %, found %',
+            snapshot_row.final_user_count, actual_member_count
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF EXISTS (
+        SELECT member.user_id
+        FROM segment_audience_snapshots AS snapshot
+        JOIN segment_audience_members AS member
+          ON member.snapshot_id = snapshot.snapshot_id
+        WHERE snapshot.allocation_plan_id = snapshot_row.allocation_plan_id
+          AND snapshot.snapshot_kind = 'final'
+        GROUP BY member.user_id
+        HAVING count(*) > 1
+    ) THEN
+        RAISE EXCEPTION 'final snapshots in one plan may not overlap'
+            USING ERRCODE = '23505';
+    END IF;
+
+    RETURN;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION validate_final_audience_snapshot()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    IF (
-        OLD.source_audience_snapshot_id,
-        OLD.audience_snapshot_id
-    ) IS DISTINCT FROM (
-        NEW.source_audience_snapshot_id,
-        NEW.audience_snapshot_id
-    ) AND EXISTS (
-        SELECT 1
-        FROM segment_audience_allocation_plan_targets AS plan_target
-        JOIN segment_audience_allocation_plans AS plan
-          ON plan.allocation_plan_id = plan_target.allocation_plan_id
-        WHERE plan_target.target_segment_id = OLD.id
-          AND plan.status = 'locked'
-    ) THEN
-        RAISE EXCEPTION
-            'target snapshots used by a locked allocation plan cannot be rebound'
-            USING ERRCODE = '55000';
+    IF TG_TABLE_NAME = 'segment_audience_members' THEN
+        IF TG_OP IN ('UPDATE', 'DELETE') THEN
+            PERFORM assert_final_audience_snapshot(OLD.snapshot_id);
+        END IF;
+        IF TG_OP IN ('INSERT', 'UPDATE')
+           AND (TG_OP = 'INSERT' OR NEW.snapshot_id <> OLD.snapshot_id) THEN
+            PERFORM assert_final_audience_snapshot(NEW.snapshot_id);
+        END IF;
+    ELSE
+        PERFORM assert_final_audience_snapshot(NEW.snapshot_id);
     END IF;
 
-    RETURN NEW;
+    RETURN NULL;
 END
 $$;
 
-DROP TRIGGER IF EXISTS trg_promotion_target_locked_snapshot_rebinding
-ON promotion_target_segments;
-CREATE TRIGGER trg_promotion_target_locked_snapshot_rebinding
-BEFORE UPDATE OF source_audience_snapshot_id, audience_snapshot_id
-ON promotion_target_segments
-FOR EACH ROW EXECUTE FUNCTION prevent_locked_target_snapshot_rebinding();
+CREATE CONSTRAINT TRIGGER trg_validate_final_audience_snapshot
+AFTER INSERT OR UPDATE
+ON segment_audience_snapshots
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION validate_final_audience_snapshot();
 
--- =========================================================
--- 13B. Segment Audience Allocation Previews
--- Stores only counts for the seven non-empty combinations of up to three
--- source candidates. Full members are materialized only for finalized plans.
--- =========================================================
-CREATE TABLE IF NOT EXISTS segment_audience_allocation_previews (
-    preview_id VARCHAR(100) PRIMARY KEY,
-    recommendation_analysis_id VARCHAR(100) NOT NULL,
-    selection_signature VARCHAR(255) NOT NULL,
-    source_snapshot_set_hash VARCHAR(128) NOT NULL,
-    allocation_policy_version VARCHAR(100) NOT NULL,
-    allocation_policy_hash VARCHAR(128) NOT NULL,
-    status VARCHAR(50) NOT NULL DEFAULT 'active',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+CREATE CONSTRAINT TRIGGER trg_validate_final_audience_member
+AFTER INSERT OR UPDATE OR DELETE
+ON segment_audience_members
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION validate_final_audience_snapshot();
 
-    CONSTRAINT fk_segment_audience_allocation_previews_analysis
-        FOREIGN KEY (recommendation_analysis_id)
-        REFERENCES promotion_analyses (analysis_id),
-
-    CONSTRAINT chk_segment_audience_allocation_previews_status
-        CHECK (status IN ('active', 'superseded')),
-
-    CONSTRAINT chk_segment_audience_allocation_previews_identity
-        CHECK (
-            btrim(selection_signature) <> ''
-            AND btrim(source_snapshot_set_hash) <> ''
-            AND btrim(allocation_policy_version) <> ''
-            AND btrim(allocation_policy_hash) <> ''
-        ),
-
-    CONSTRAINT uq_segment_audience_allocation_previews_version
-        UNIQUE (
-            recommendation_analysis_id,
-            selection_signature,
-            source_snapshot_set_hash,
-            allocation_policy_version,
-            allocation_policy_hash
-        )
-);
-
-CREATE INDEX IF NOT EXISTS idx_segment_audience_allocation_previews_analysis_selection
-ON segment_audience_allocation_previews (
-    recommendation_analysis_id,
-    selection_signature
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS uq_segment_audience_allocation_previews_active
-ON segment_audience_allocation_previews (
-    recommendation_analysis_id,
-    selection_signature
+CREATE OR REPLACE FUNCTION assert_segment_audience_allocation_plan(
+    p_allocation_plan_id UUID
 )
-WHERE status = 'active';
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    plan_row segment_audience_allocation_plans%ROWTYPE;
+    stored_segment_ids JSONB;
+BEGIN
+    SELECT *
+    INTO plan_row
+    FROM segment_audience_allocation_plans
+    WHERE allocation_plan_id = p_allocation_plan_id;
 
-CREATE TABLE IF NOT EXISTS segment_audience_allocation_preview_targets (
-    preview_id VARCHAR(100) NOT NULL,
-    segment_id VARCHAR(100) NOT NULL,
-    final_user_count INT NOT NULL,
-    targetable BOOLEAN NOT NULL,
-    audience_status VARCHAR(50) NOT NULL,
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
 
-    CONSTRAINT pk_segment_audience_allocation_preview_targets
-        PRIMARY KEY (preview_id, segment_id),
+    SELECT jsonb_agg(to_jsonb(segment_id) ORDER BY segment_id COLLATE "C")
+    INTO stored_segment_ids
+    FROM promotion_target_segments
+    WHERE allocation_plan_id = p_allocation_plan_id;
 
-    CONSTRAINT fk_segment_audience_allocation_preview_targets_preview
-        FOREIGN KEY (preview_id)
-        REFERENCES segment_audience_allocation_previews (preview_id),
+    IF stored_segment_ids IS DISTINCT FROM plan_row.selected_segment_ids_json THEN
+        RAISE EXCEPTION 'allocation plan target set does not match selected segments'
+            USING ERRCODE = '23514';
+    END IF;
 
-    CONSTRAINT fk_segment_audience_allocation_preview_targets_segment
-        FOREIGN KEY (segment_id)
-        REFERENCES segment_definitions (segment_id),
+    IF EXISTS (
+        SELECT 1
+        FROM promotion_target_segments AS target
+        JOIN segment_audience_snapshots AS snapshot
+          ON snapshot.snapshot_id = target.audience_snapshot_id
+        WHERE target.allocation_plan_id = p_allocation_plan_id
+          AND (
+              target.analysis_id <> plan_row.target_analysis_id
+              OR target.promotion_id <> plan_row.promotion_id
+              OR target.project_id <> snapshot.project_id
+              OR target.campaign_id <> snapshot.campaign_id
+              OR target.promotion_id <> snapshot.promotion_id
+              OR target.segment_id <> snapshot.segment_id
+              OR snapshot.snapshot_kind <> 'final'
+              OR snapshot.allocation_plan_id <> p_allocation_plan_id
+          )
+    ) THEN
+        RAISE EXCEPTION 'allocation plan target identity mismatch'
+            USING ERRCODE = '23514';
+    END IF;
 
-    CONSTRAINT chk_segment_audience_allocation_preview_targets_final_count
-        CHECK (final_user_count >= 0),
+    IF plan_row.status = 'finalized' THEN
+        IF EXISTS (
+            SELECT 1
+            FROM promotion_target_segments
+            WHERE allocation_plan_id = p_allocation_plan_id
+              AND audience_reservation_state <> 'reserved'
+        ) OR EXISTS (
+            SELECT 1
+            FROM promotion_run_target_bindings
+            WHERE allocation_plan_id = p_allocation_plan_id
+        ) THEN
+            RAISE EXCEPTION 'finalized plan must contain only reserved targets'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF plan_row.status = 'locked' THEN
+        IF NOT EXISTS (
+            SELECT 1
+            FROM promotion_run_target_bindings
+            WHERE allocation_plan_id = p_allocation_plan_id
+        ) OR EXISTS (
+            SELECT 1
+            FROM promotion_target_segments AS target
+            WHERE target.allocation_plan_id = p_allocation_plan_id
+              AND target.audience_reservation_state <>
+                  CASE
+                      WHEN EXISTS (
+                          SELECT 1
+                          FROM promotion_run_target_bindings AS binding
+                          WHERE binding.target_analysis_id = target.analysis_id
+                            AND binding.segment_id = target.segment_id
+                      ) THEN 'consumed'
+                      ELSE 'reserved'
+                  END
+        ) THEN
+            RAISE EXCEPTION 'locked plan target states must match run bindings'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSE
+        IF EXISTS (
+            SELECT 1
+            FROM promotion_run_target_bindings
+            WHERE allocation_plan_id = p_allocation_plan_id
+        ) OR EXISTS (
+            SELECT 1
+            FROM promotion_target_segments
+            WHERE allocation_plan_id = p_allocation_plan_id
+              AND audience_reservation_state <> 'released'
+        ) THEN
+            RAISE EXCEPTION 'released plan must release every unbound target'
+                USING ERRCODE = '23514';
+        END IF;
 
-    CONSTRAINT chk_segment_audience_allocation_preview_targets_targetable
-        CHECK (targetable = (final_user_count > 0)),
+        IF EXISTS (
+            SELECT 1
+            FROM promotion_audience_exclusion_members
+            WHERE allocation_plan_id = p_allocation_plan_id
+              AND state IN ('reserved', 'consumed')
+        ) THEN
+            RAISE EXCEPTION 'released plan may not retain active exclusions'
+                USING ERRCODE = '23514';
+        END IF;
+    END IF;
 
-    CONSTRAINT chk_segment_audience_allocation_preview_targets_audience_status
-        CHECK (audience_status IN (
-            'no_eligible_audience',
-            'insufficient_sample',
-            'targetable'
-        ))
-);
+    IF plan_row.status <> 'released' AND EXISTS (
+        SELECT 1
+        FROM promotion_target_segments AS target
+        JOIN segment_audience_snapshots AS snapshot
+          ON snapshot.snapshot_id = target.audience_snapshot_id
+        WHERE target.allocation_plan_id = p_allocation_plan_id
+          AND (
+              SELECT count(*)
+              FROM promotion_audience_exclusion_members AS excluded
+              WHERE excluded.allocation_plan_id = p_allocation_plan_id
+                AND excluded.segment_id = target.segment_id
+                AND excluded.final_snapshot_id = target.audience_snapshot_id
+                AND excluded.state = target.audience_reservation_state
+          ) <> snapshot.final_user_count
+    ) THEN
+        RAISE EXCEPTION 'allocation plan exclusion member count mismatch'
+            USING ERRCODE = '23514';
+    END IF;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION validate_allocation_plan_trigger()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    affected_plan_id UUID;
+BEGIN
+    affected_plan_id := CASE
+        WHEN TG_TABLE_NAME = 'segment_audience_allocation_plans' THEN
+            CASE WHEN TG_OP = 'DELETE' THEN OLD.allocation_plan_id
+                 ELSE NEW.allocation_plan_id END
+        ELSE
+            CASE WHEN TG_OP = 'DELETE' THEN OLD.allocation_plan_id
+                 ELSE NEW.allocation_plan_id END
+    END;
+
+    IF affected_plan_id IS NOT NULL THEN
+        PERFORM assert_segment_audience_allocation_plan(affected_plan_id);
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE CONSTRAINT TRIGGER trg_validate_allocation_plan
+AFTER INSERT OR UPDATE
+ON segment_audience_allocation_plans
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION validate_allocation_plan_trigger();
+
+CREATE CONSTRAINT TRIGGER trg_validate_allocation_target
+AFTER INSERT OR UPDATE
+ON promotion_target_segments
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION validate_allocation_plan_trigger();
+
+CREATE OR REPLACE FUNCTION prevent_promotion_run_target_binding_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE EXCEPTION 'promotion run target bindings are immutable'
+        USING ERRCODE = '55000';
+END
+$$;
+
+CREATE TRIGGER trg_promotion_run_target_binding_immutable
+BEFORE UPDATE OR DELETE
+ON promotion_run_target_bindings
+FOR EACH ROW EXECUTE FUNCTION prevent_promotion_run_target_binding_mutation();
+
+CREATE OR REPLACE FUNCTION assert_promotion_run_target_bindings(
+    p_promotion_run_id VARCHAR(100)
+)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    run_row promotion_runs%ROWTYPE;
+    bound_segment_ids JSONB;
+    v2_target_count INT;
+BEGIN
+    SELECT *
+    INTO run_row
+    FROM promotion_runs
+    WHERE promotion_run_id = p_promotion_run_id;
+
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+
+    SELECT count(*)
+    INTO v2_target_count
+    FROM promotion_target_segments AS target
+    WHERE target.analysis_id = run_row.analysis_id
+      AND target.segment_id IN (
+          SELECT value #>> '{}'
+          FROM jsonb_array_elements(run_row.segment_scope_json) AS items(value)
+      )
+      AND target.allocation_plan_id IS NOT NULL;
+
+    IF v2_target_count = 0
+       AND NOT EXISTS (
+           SELECT 1
+           FROM promotion_run_target_bindings
+           WHERE promotion_run_id = p_promotion_run_id
+       ) THEN
+        RETURN;
+    END IF;
+
+    SELECT jsonb_agg(to_jsonb(segment_id) ORDER BY segment_id COLLATE "C")
+    INTO bound_segment_ids
+    FROM promotion_run_target_bindings
+    WHERE promotion_run_id = p_promotion_run_id;
+
+    IF bound_segment_ids IS DISTINCT FROM run_row.segment_scope_json THEN
+        RAISE EXCEPTION 'run binding set must match the run segment scope'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM promotion_run_target_bindings AS binding
+        JOIN promotion_target_segments AS target
+          ON target.analysis_id = binding.target_analysis_id
+         AND target.segment_id = binding.segment_id
+        JOIN segment_audience_allocation_plans AS plan
+          ON plan.allocation_plan_id = binding.allocation_plan_id
+        JOIN segment_audience_snapshots AS snapshot
+          ON snapshot.snapshot_id = binding.final_snapshot_id
+        JOIN generation_runs AS generation
+          ON generation.generation_id = run_row.generation_id
+        WHERE binding.promotion_run_id = p_promotion_run_id
+          AND (
+              binding.target_analysis_id <> run_row.analysis_id
+              OR target.project_id <> run_row.project_id
+              OR target.campaign_id <> run_row.campaign_id
+              OR target.promotion_id <> run_row.promotion_id
+              OR target.allocation_plan_id <> binding.allocation_plan_id
+              OR target.audience_snapshot_id <> binding.final_snapshot_id
+              OR target.audience_reservation_state <> 'consumed'
+              OR plan.status <> 'locked'
+              OR plan.target_analysis_id <> run_row.analysis_id
+              OR plan.promotion_id <> run_row.promotion_id
+              OR snapshot.snapshot_kind <> 'final'
+              OR generation.analysis_id <> run_row.analysis_id
+              OR generation.project_id <> run_row.project_id
+              OR generation.campaign_id <> run_row.campaign_id
+              OR generation.promotion_id <> run_row.promotion_id
+          )
+    ) THEN
+        RAISE EXCEPTION 'run binding identity or lifecycle mismatch'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM promotion_run_target_bindings AS binding
+        JOIN segment_audience_snapshots AS snapshot
+          ON snapshot.snapshot_id = binding.final_snapshot_id
+        WHERE binding.promotion_run_id = p_promotion_run_id
+          AND (
+              SELECT count(*)
+              FROM promotion_audience_exclusion_members AS excluded
+              WHERE excluded.target_analysis_id = binding.target_analysis_id
+                AND excluded.segment_id = binding.segment_id
+                AND excluded.allocation_plan_id = binding.allocation_plan_id
+                AND excluded.final_snapshot_id = binding.final_snapshot_id
+                AND excluded.state = 'consumed'
+          ) <> snapshot.final_user_count
+    ) THEN
+        RAISE EXCEPTION 'run binding consumed member count mismatch'
+            USING ERRCODE = '23514';
+    END IF;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION validate_promotion_run_target_bindings_trigger()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    affected_run_id VARCHAR(100);
+BEGIN
+    affected_run_id := CASE
+        WHEN TG_OP = 'DELETE' THEN OLD.promotion_run_id
+        ELSE NEW.promotion_run_id
+    END;
+    PERFORM assert_promotion_run_target_bindings(affected_run_id);
+    RETURN NULL;
+END
+$$;
+
+CREATE CONSTRAINT TRIGGER trg_validate_promotion_run_binding
+AFTER INSERT
+ON promotion_run_target_bindings
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION validate_promotion_run_target_bindings_trigger();
+
+CREATE CONSTRAINT TRIGGER trg_validate_promotion_run_scope
+AFTER INSERT OR UPDATE
+ON promotion_runs
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION validate_promotion_run_target_bindings_trigger();
+
+-- Preview combinations are stored in
+-- promotion_analyses.output_json->'audience_allocation_preview_context'.
+-- No allocation preview relation is created.
 
 -- =========================================================
 -- 14. Ad Experiments
