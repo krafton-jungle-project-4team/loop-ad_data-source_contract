@@ -115,6 +115,32 @@ done
 clickhouse_file \
     "${FRESH_CONTAINER}" \
     "${ROOT_DIR}/clickhouse/tests/verify_user_behavior_vector_revisions.sql"
+clickhouse_file \
+    "${FRESH_CONTAINER}" \
+    "${ROOT_DIR}/clickhouse/tests/verify_promotion_audience_exclusions.sql"
+
+if clickhouse_query "${FRESH_CONTAINER}" "
+    INSERT INTO loopad.promotion_audience_exclusion_projection (
+        project_id,
+        campaign_id,
+        promotion_id,
+        user_id,
+        state,
+        exclusion_revision,
+        updated_at
+    ) VALUES (
+        'contract_project',
+        'campaign_a',
+        'promotion_a',
+        'invalid_state_user',
+        'unknown',
+        4,
+        now64(6, 'UTC')
+    );
+" >/dev/null 2>&1; then
+    printf 'invalid ClickHouse exclusion state was accepted\n' >&2
+    exit 1
+fi
 
 log "verifying additive expansion from ${BASE_REF}"
 clickhouse_git_file "${MIGRATED_CONTAINER}" clickhouse/schema.sql
@@ -142,6 +168,27 @@ for _ in 1 2; do
         "${MIGRATED_CONTAINER}" \
         "${ROOT_DIR}/clickhouse/expand_user_behavior_vector_revisions.sql"
 done
+for _ in 1 2; do
+    clickhouse_file \
+        "${MIGRATED_CONTAINER}" \
+        "${ROOT_DIR}/clickhouse/expand_promotion_audience_exclusions.sql"
+done
+
+clickhouse_query "${MIGRATED_CONTAINER}" "
+    CREATE VIEW loopad.promotion_audience_exclusion_current AS
+    SELECT 1 AS unsupported_draft_marker;
+" >/dev/null
+
+if clickhouse_file \
+    "${MIGRATED_CONTAINER}" \
+    "${ROOT_DIR}/clickhouse/expand_promotion_audience_exclusions.sql"; then
+    printf 'ClickHouse exclusion migration accepted obsolete helper views\n' >&2
+    exit 1
+fi
+
+clickhouse_query "${MIGRATED_CONTAINER}" \
+    'DROP VIEW loopad.promotion_audience_exclusion_current;' >/dev/null
+
 for _ in 1 2; do
     clickhouse_file \
         "${MIGRATED_CONTAINER}" \
@@ -176,6 +223,9 @@ fi
 clickhouse_file \
     "${MIGRATED_CONTAINER}" \
     "${ROOT_DIR}/clickhouse/tests/verify_user_behavior_vector_revisions.sql"
+clickhouse_file \
+    "${MIGRATED_CONTAINER}" \
+    "${ROOT_DIR}/clickhouse/tests/verify_promotion_audience_exclusions.sql"
 
 fresh_revision_ddl="$(clickhouse_query "${FRESH_CONTAINER}" \
     'SHOW CREATE TABLE loopad.user_behavior_vector_revisions')"
@@ -192,4 +242,37 @@ if [[ "${fresh_revision_ddl}" != "${migrated_revision_ddl}" \
     exit 1
 fi
 
-log 'all ClickHouse vector revision contract checks passed'
+for relation_name in \
+    promotion_audience_exclusion_projection \
+    promotion_audience_exclusion_projection_status \
+    promotion_audience_exclusion_active; do
+    fresh_exclusion_ddl="$(clickhouse_query "${FRESH_CONTAINER}" \
+        "SHOW CREATE TABLE loopad.${relation_name}")"
+    migrated_exclusion_ddl="$(clickhouse_query "${MIGRATED_CONTAINER}" \
+        "SHOW CREATE TABLE loopad.${relation_name}")"
+
+    if [[ "${fresh_exclusion_ddl}" != "${migrated_exclusion_ddl}" ]]; then
+        printf 'fresh and migrated exclusion metadata differ: %s\n' \
+            "${relation_name}" >&2
+        exit 1
+    fi
+done
+
+for container_name in "${FRESH_CONTAINER}" "${MIGRATED_CONTAINER}"; do
+    obsolete_helper_count="$(clickhouse_query "${container_name}" "
+        SELECT count()
+        FROM system.tables
+        WHERE database = 'loopad'
+          AND name IN (
+              'promotion_audience_exclusion_current',
+              'promotion_audience_exclusion_projection_status_current'
+          );
+    ")"
+    if [[ "${obsolete_helper_count}" != '0' ]]; then
+        printf 'obsolete exclusion helper views remain in %s\n' \
+            "${container_name}" >&2
+        exit 1
+    fi
+done
+
+log 'all ClickHouse vector revision and exclusion checks passed'

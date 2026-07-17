@@ -15,6 +15,7 @@ FRESH_DB="fresh_contract"
 LEGACY_DB="legacy_contract"
 EXECUTION_BASE_DB="execution_base_contract"
 GENERATION_LEGACY_DB="generation_legacy_contract"
+AUDIENCE_LEGACY_DB="audience_legacy_contract"
 
 cleanup() {
     docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
@@ -175,6 +176,8 @@ docker exec "${CONTAINER_NAME}" \
     createdb -U "${POSTGRES_USER}" "${EXECUTION_BASE_DB}"
 docker exec "${CONTAINER_NAME}" \
     createdb -U "${POSTGRES_USER}" "${GENERATION_LEGACY_DB}"
+docker exec "${CONTAINER_NAME}" \
+    createdb -U "${POSTGRES_USER}" "${AUDIENCE_LEGACY_DB}"
 
 log 'verifying fresh schema and rerunnable dummy data'
 psql_file "${FRESH_DB}" "${ROOT_DIR}/postgres/schema.sql"
@@ -228,6 +231,155 @@ psql_file \
 psql_file \
     "${FRESH_DB}" \
     "${ROOT_DIR}/postgres/tests/verify_generation_v1.sql"
+psql_file \
+    "${FRESH_DB}" \
+    "${ROOT_DIR}/postgres/tests/verify_segment_audience_allocation.sql"
+
+log "verifying Segment Audience v1.9 -> v1.10 allocation migration from ${REQUESTED_BASE_REF}"
+psql_git_file \
+    "${AUDIENCE_LEGACY_DB}" \
+    "${REQUESTED_BASE_REF}" \
+    postgres/schema.sql
+psql_git_file \
+    "${AUDIENCE_LEGACY_DB}" \
+    "${REQUESTED_BASE_REF}" \
+    postgres/dummy.sql
+
+for _ in 1 2; do
+    psql_file \
+        "${AUDIENCE_LEGACY_DB}" \
+        "${ROOT_DIR}/postgres/expand_segment_audience_v2.sql"
+done
+
+audience_legacy_fingerprint_before="$(psql_query "${AUDIENCE_LEGACY_DB}" "
+SELECT md5(string_agg(item, E'\\n' ORDER BY item))
+FROM (
+    SELECT
+        'target|' || id || '|' || status || '|' || rule_json::text AS item
+    FROM promotion_target_segments
+    UNION ALL
+    SELECT
+        'run|' || promotion_run_id || '|' || status || '|' ||
+        segment_scope_fingerprint AS item
+    FROM promotion_runs
+    UNION ALL
+    SELECT
+        'assignment|' || promotion_run_id || '|' || user_id || '|' ||
+        assignment_source AS item
+    FROM user_segment_assignments
+) AS persisted;
+")"
+
+for _ in 1 2; do
+    psql_file \
+        "${AUDIENCE_LEGACY_DB}" \
+        "${ROOT_DIR}/postgres/expand_segment_audience_allocation.sql"
+done
+
+audience_legacy_fingerprint_after="$(psql_query "${AUDIENCE_LEGACY_DB}" "
+SELECT md5(string_agg(item, E'\\n' ORDER BY item))
+FROM (
+    SELECT
+        'target|' || id || '|' || status || '|' || rule_json::text AS item
+    FROM promotion_target_segments
+    UNION ALL
+    SELECT
+        'run|' || promotion_run_id || '|' || status || '|' ||
+        segment_scope_fingerprint AS item
+    FROM promotion_runs
+    UNION ALL
+    SELECT
+        'assignment|' || promotion_run_id || '|' || user_id || '|' ||
+        assignment_source AS item
+    FROM user_segment_assignments
+) AS persisted;
+")"
+
+if [[ "${audience_legacy_fingerprint_before}" != \
+      "${audience_legacy_fingerprint_after}" ]]; then
+    printf 'Segment Audience allocation migration changed legacy rows\n' >&2
+    exit 1
+fi
+
+assert_query "${AUDIENCE_LEGACY_DB}" "
+SELECT (
+    NOT EXISTS (
+        SELECT 1
+        FROM promotion_target_segments
+        WHERE audience_snapshot_id IS NOT NULL
+           OR allocation_plan_id IS NOT NULL
+           OR audience_reservation_state IS NOT NULL
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM promotion_run_target_bindings
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM promotion_audience_exclusion_members
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM promotion_audience_exclusion_state
+    )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM pg_class
+        WHERE relname IN (
+            'segment_audience_allocation_plan_segments',
+            'segment_audience_allocation_members',
+            'segment_audience_allocation_previews',
+            'segment_audience_allocation_preview_targets',
+            'promotion_audience_exclusion_revisions',
+            'promotion_audience_exclusion_events',
+            'promotion_run_target_audience_bindings'
+        )
+          AND relkind IN ('r', 'p', 'v', 'm')
+    )
+)::int;
+" '1'
+
+log 'confirming pre-release allocation drafts fail instead of being rewritten'
+psql_query "${AUDIENCE_LEGACY_DB}" "
+CREATE TABLE segment_audience_allocation_members (
+    allocation_plan_id UUID NOT NULL,
+    user_id VARCHAR(255) NOT NULL
+);
+" >/dev/null
+
+if psql_file \
+    "${AUDIENCE_LEGACY_DB}" \
+    "${ROOT_DIR}/postgres/expand_segment_audience_allocation.sql"; then
+    printf 'allocation migration unexpectedly accepted a pre-release draft\n' >&2
+    exit 1
+fi
+
+psql_query "${AUDIENCE_LEGACY_DB}" \
+    'DROP TABLE segment_audience_allocation_members;' >/dev/null
+
+psql_file \
+    "${AUDIENCE_LEGACY_DB}" \
+    "${ROOT_DIR}/postgres/tests/verify_segment_audience_allocation.sql"
+
+normalized_schema_dump() {
+    local database="$1"
+
+    docker exec "${CONTAINER_NAME}" \
+        pg_dump -U "${POSTGRES_USER}" -d "${database}" \
+            --schema-only --no-owner --no-privileges \
+        | sed \
+            -e '/^-- Dumped from database version/d' \
+            -e '/^-- Dumped by pg_dump version/d' \
+            -e '/^\\restrict /d' \
+            -e '/^\\unrestrict /d'
+}
+
+fresh_audience_schema="$(normalized_schema_dump "${FRESH_DB}")"
+migrated_audience_schema="$(normalized_schema_dump "${AUDIENCE_LEGACY_DB}")"
+if [[ "${fresh_audience_schema}" != "${migrated_audience_schema}" ]]; then
+    printf 'fresh and migrated Segment Audience v1.10 schemas differ\n' >&2
+    diff -u \
+        <(printf '%s\n' "${fresh_audience_schema}") \
+        <(printf '%s\n' "${migrated_audience_schema}") >&2 || true
+    exit 1
+fi
 
 log "verifying promotion legacy migration from ${PROMOTION_BASE_REF}"
 psql_git_file "${LEGACY_DB}" "${PROMOTION_BASE_REF}" postgres/schema.sql
