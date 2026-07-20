@@ -16,6 +16,7 @@ LEGACY_DB="legacy_contract"
 EXECUTION_BASE_DB="execution_base_contract"
 GENERATION_LEGACY_DB="generation_legacy_contract"
 AUDIENCE_LEGACY_DB="audience_legacy_contract"
+AUTOMATION_LEGACY_DB="automation_legacy_contract"
 
 cleanup() {
     docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
@@ -178,9 +179,17 @@ docker exec "${CONTAINER_NAME}" \
     createdb -U "${POSTGRES_USER}" "${GENERATION_LEGACY_DB}"
 docker exec "${CONTAINER_NAME}" \
     createdb -U "${POSTGRES_USER}" "${AUDIENCE_LEGACY_DB}"
+docker exec "${CONTAINER_NAME}" \
+    createdb -U "${POSTGRES_USER}" "${AUTOMATION_LEGACY_DB}"
 
 log 'verifying fresh schema and rerunnable dummy data'
 psql_file "${FRESH_DB}" "${ROOT_DIR}/postgres/schema.sql"
+
+for _ in 1 2; do
+    psql_file \
+        "${FRESH_DB}" \
+        "${ROOT_DIR}/postgres/expand_promotion_automation_v1.sql"
+done
 
 assert_query "${FRESH_DB}" "
 SELECT (
@@ -234,6 +243,29 @@ psql_file \
 psql_file \
     "${FRESH_DB}" \
     "${ROOT_DIR}/postgres/tests/verify_segment_audience_allocation.sql"
+psql_file \
+    "${FRESH_DB}" \
+    "${ROOT_DIR}/postgres/tests/verify_promotion_automation_v1.sql"
+
+log "verifying promotion automation migration from ${REQUESTED_BASE_REF}"
+psql_git_file \
+    "${AUTOMATION_LEGACY_DB}" \
+    "${REQUESTED_BASE_REF}" \
+    postgres/schema.sql
+psql_git_file \
+    "${AUTOMATION_LEGACY_DB}" \
+    "${REQUESTED_BASE_REF}" \
+    postgres/dummy.sql
+
+for _ in 1 2; do
+    psql_file \
+        "${AUTOMATION_LEGACY_DB}" \
+        "${ROOT_DIR}/postgres/expand_promotion_automation_v1.sql"
+done
+
+psql_file \
+    "${AUTOMATION_LEGACY_DB}" \
+    "${ROOT_DIR}/postgres/tests/verify_promotion_automation_v1.sql"
 
 log "verifying Segment Audience v1.9 -> v1.10 allocation migration from ${REQUESTED_BASE_REF}"
 psql_git_file \
@@ -357,6 +389,12 @@ psql_query "${AUDIENCE_LEGACY_DB}" \
 psql_file \
     "${AUDIENCE_LEGACY_DB}" \
     "${ROOT_DIR}/postgres/tests/verify_segment_audience_allocation.sql"
+
+for _ in 1 2; do
+    psql_file \
+        "${AUDIENCE_LEGACY_DB}" \
+        "${ROOT_DIR}/postgres/expand_promotion_automation_v1.sql"
+done
 
 normalized_schema_dump() {
     local database="$1"
