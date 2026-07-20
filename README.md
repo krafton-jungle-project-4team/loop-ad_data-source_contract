@@ -91,7 +91,7 @@ Fallback 식별자인 `seg_existing_all`은 특정 프로젝트에 속하지 않
 
 Manual next-loop 관련 preparation·child lineage·legacy serving provenance 계약은 `postgres/schema.sql`에 정의합니다. 실제 dev/운영 DB 적용은 별도 운영 절차로 수행하며 migration history는 관리하지 않습니다.
 
-프로모션 실행 방식은 `manual`과 `automatic`을 지원합니다. 예약 시작·종료 시각과 반복 평가 간격은 `promotions`에 저장하고, 자동 실행 작업은 `promotion_automation_jobs`에서 run별 `launch_run`·`evaluate_run` 작업으로 관리합니다. 기존 프로모션은 migration 이후에도 `manual`, 1일 간격 기본값을 유지하며 자동 작업은 생성되지 않습니다.
+프로모션 실행 방식은 `manual`과 `automatic`을 지원합니다. 예약 시작·종료 시각과 반복 평가 간격은 `promotions`에 저장하고, 자동 실행 작업은 `promotion_automation_jobs`에서 run별 `launch_run`·`evaluate_run` 작업으로 관리합니다. 프로모션의 명시적 실행 기간은 상위 캠페인 기간 안에 있어야 하며, 프로모션 일정이 깨지는 캠페인 기간 축소도 DB에서 차단합니다. 캠페인 날짜 경계는 `Asia/Seoul` 기준으로 시작일 00:00부터 종료일 다음 날 00:00 직전까지입니다. 기존 프로모션은 migration 이후에도 `manual`, 1일 간격 기본값을 유지하며 자동 작업은 생성되지 않습니다.
 
 기존 dev/운영 PostgreSQL에는 애플리케이션 배포 전에 다음 additive migration을 먼저 적용합니다. `schema.sql`은 fresh DB 기준 파일이며 기존 Docker volume에서는 `/docker-entrypoint-initdb.d`가 다시 실행되지 않습니다.
 
@@ -101,7 +101,7 @@ psql -X -v ON_ERROR_STOP=1 \
   -f postgres/expand_promotion_automation_v1.sql
 ```
 
-migration은 재실행할 수 있습니다. 적용 후 `promotions.execution_mode`, 예약·반복 간격 컬럼과 `promotion_automation_jobs` 테이블·인덱스를 확인한 다음 Dashboard를 배포합니다.
+migration은 재실행할 수 있습니다. 적용 후 `promotions.execution_mode`, 예약·반복 간격 컬럼, 캠페인-프로모션 일정 트리거와 `promotion_automation_jobs` 테이블·인덱스를 확인한 다음 Dashboard를 배포합니다.
 
 Promotion run의 full composite identity는 `project_id + promotion_id + analysis_id + generation_id + segment_scope_fingerprint + loop_count`입니다. `segment_scope_fingerprint`는 fallback `seg_existing_all`을 제외하고 C collation으로 정렬·중복 제거한 segment ID 배열의 compact JSON SHA-256입니다. 따라서 다른 `analysis_id` 또는 `generation_id`는 같은 promotion·loop·scope라도 별도 실행 identity입니다. Dashboard 문서에서 쓰는 `promotion_id + loop_count + segment_scope_fingerprint`는 조회 맥락을 설명하는 축약 표현이며 실제 unique key를 뜻하지 않습니다.
 

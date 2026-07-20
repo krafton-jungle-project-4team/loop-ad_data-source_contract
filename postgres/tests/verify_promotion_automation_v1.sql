@@ -55,8 +55,34 @@ BEGIN
        OR to_regclass('idx_promotion_automation_jobs_expired_lease') IS NULL THEN
         RAISE EXCEPTION 'promotion automation job indexes are missing';
     END IF;
+
+    IF to_regprocedure('loopad_campaign_start_at(date)') IS NULL
+       OR to_regprocedure('loopad_campaign_end_at(date)') IS NULL THEN
+        RAISE EXCEPTION 'campaign schedule boundary functions are missing';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_trigger
+        WHERE tgrelid = 'promotions'::regclass
+          AND tgname = 'trg_promotions_campaign_schedule'
+          AND NOT tgisinternal
+    ) OR NOT EXISTS (
+        SELECT 1
+        FROM pg_trigger
+        WHERE tgrelid = 'campaigns'::regclass
+          AND tgname = 'trg_campaigns_promotion_schedules'
+          AND NOT tgisinternal
+    ) THEN
+        RAISE EXCEPTION 'campaign promotion schedule triggers are missing';
+    END IF;
 END
 $$;
+
+UPDATE campaigns
+SET start_date = DATE '2026-07-01',
+    end_date = DATE '2026-08-31'
+WHERE campaign_id = 'camp_expedia_hotel_demo';
 
 UPDATE promotions
 SET execution_mode = 'automatic',
@@ -65,6 +91,33 @@ SET execution_mode = 'automatic',
     loop_interval_unit = 'hour',
     loop_interval_value = 6
 WHERE promotion_id = 'promo_expedia_email_reactivation';
+
+SELECT pg_temp.expect_failure(
+    $statement$
+    UPDATE promotions
+    SET scheduled_start_at = TIMESTAMPTZ '2026-06-30 23:59:00+09'
+    WHERE promotion_id = 'promo_expedia_email_reactivation'
+    $statement$,
+    '23514'
+);
+
+SELECT pg_temp.expect_failure(
+    $statement$
+    UPDATE promotions
+    SET scheduled_end_at = TIMESTAMPTZ '2026-09-01 00:01:00+09'
+    WHERE promotion_id = 'promo_expedia_email_reactivation'
+    $statement$,
+    '23514'
+);
+
+SELECT pg_temp.expect_failure(
+    $statement$
+    UPDATE campaigns
+    SET end_date = DATE '2026-07-31'
+    WHERE campaign_id = 'camp_expedia_hotel_demo'
+    $statement$,
+    '23514'
+);
 
 SELECT pg_temp.expect_failure(
     $statement$

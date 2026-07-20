@@ -237,7 +237,10 @@ CREATE TABLE IF NOT EXISTS campaigns (
         )),
 
     CONSTRAINT chk_campaigns_status
-        CHECK (status IN ('draft', 'active', 'paused', 'completed', 'stopped'))
+        CHECK (status IN ('draft', 'active', 'paused', 'completed', 'stopped')),
+
+    CONSTRAINT chk_campaigns_schedule
+        CHECK (start_date IS NULL OR end_date IS NULL OR end_date >= start_date)
 );
 
 CREATE INDEX IF NOT EXISTS idx_campaigns_project_id
@@ -356,6 +359,159 @@ ON promotions (status);
 
 CREATE INDEX IF NOT EXISTS idx_promotions_channel
 ON promotions (channel);
+
+CREATE OR REPLACE FUNCTION loopad_campaign_start_at(p_start_date DATE)
+RETURNS TIMESTAMPTZ
+LANGUAGE SQL
+STABLE
+STRICT
+PARALLEL SAFE
+SET search_path = pg_catalog
+AS $$
+    SELECT p_start_date::timestamp AT TIME ZONE 'Asia/Seoul'
+$$;
+
+CREATE OR REPLACE FUNCTION loopad_campaign_end_at(p_end_date DATE)
+RETURNS TIMESTAMPTZ
+LANGUAGE SQL
+STABLE
+STRICT
+PARALLEL SAFE
+SET search_path = pg_catalog
+AS $$
+    SELECT (p_end_date + 1)::timestamp AT TIME ZONE 'Asia/Seoul'
+$$;
+
+CREATE OR REPLACE FUNCTION enforce_promotion_campaign_schedule()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+    campaign_start_at TIMESTAMPTZ;
+    campaign_end_at TIMESTAMPTZ;
+BEGIN
+    SELECT
+        loopad_campaign_start_at(c.start_date),
+        loopad_campaign_end_at(c.end_date)
+    INTO campaign_start_at, campaign_end_at
+    FROM campaigns c
+    WHERE c.project_id = NEW.project_id
+      AND c.campaign_id = NEW.campaign_id;
+
+    IF NOT FOUND THEN
+        RAISE foreign_key_violation
+            USING MESSAGE = 'promotion project and campaign must reference the same campaign';
+    END IF;
+
+    IF campaign_start_at IS NOT NULL
+       AND NEW.scheduled_start_at IS NOT NULL
+       AND NEW.scheduled_start_at < campaign_start_at THEN
+        RAISE check_violation
+            USING MESSAGE = 'promotion start must be within the campaign schedule',
+                  CONSTRAINT = 'chk_promotions_campaign_schedule';
+    END IF;
+
+    IF campaign_end_at IS NOT NULL
+       AND NEW.scheduled_start_at IS NOT NULL
+       AND NEW.scheduled_start_at >= campaign_end_at THEN
+        RAISE check_violation
+            USING MESSAGE = 'promotion start must be before the campaign end',
+                  CONSTRAINT = 'chk_promotions_campaign_schedule';
+    END IF;
+
+    IF campaign_start_at IS NOT NULL
+       AND NEW.scheduled_end_at IS NOT NULL
+       AND NEW.scheduled_end_at <= campaign_start_at THEN
+        RAISE check_violation
+            USING MESSAGE = 'promotion end must be after the campaign start',
+                  CONSTRAINT = 'chk_promotions_campaign_schedule';
+    END IF;
+
+    IF campaign_end_at IS NOT NULL
+       AND NEW.scheduled_end_at IS NOT NULL
+       AND NEW.scheduled_end_at > campaign_end_at THEN
+        RAISE check_violation
+            USING MESSAGE = 'promotion end must be within the campaign schedule',
+                  CONSTRAINT = 'chk_promotions_campaign_schedule';
+    END IF;
+
+    RETURN NEW;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION enforce_campaign_promotion_schedules()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+    conflicting_promotion_id VARCHAR(100);
+    campaign_start_at TIMESTAMPTZ := loopad_campaign_start_at(NEW.start_date);
+    campaign_end_at TIMESTAMPTZ := loopad_campaign_end_at(NEW.end_date);
+BEGIN
+    IF NEW.start_date IS NOT DISTINCT FROM OLD.start_date
+       AND NEW.end_date IS NOT DISTINCT FROM OLD.end_date THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT p.promotion_id
+    INTO conflicting_promotion_id
+    FROM promotions p
+    WHERE p.project_id = NEW.project_id
+      AND p.campaign_id = NEW.campaign_id
+      AND p.status <> 'stopped'
+      AND (
+          (
+              campaign_start_at IS NOT NULL
+              AND p.scheduled_start_at IS NOT NULL
+              AND p.scheduled_start_at < campaign_start_at
+          )
+          OR (
+              campaign_end_at IS NOT NULL
+              AND p.scheduled_start_at IS NOT NULL
+              AND p.scheduled_start_at >= campaign_end_at
+          )
+          OR (
+              campaign_start_at IS NOT NULL
+              AND p.scheduled_end_at IS NOT NULL
+              AND p.scheduled_end_at <= campaign_start_at
+          )
+          OR (
+              campaign_end_at IS NOT NULL
+              AND p.scheduled_end_at IS NOT NULL
+              AND p.scheduled_end_at > campaign_end_at
+          )
+      )
+    ORDER BY p.promotion_id
+    LIMIT 1;
+
+    IF conflicting_promotion_id IS NOT NULL THEN
+        RAISE check_violation
+            USING MESSAGE = format(
+                      'campaign schedule conflicts with promotion %s',
+                      conflicting_promotion_id
+                  ),
+                  CONSTRAINT = 'chk_campaigns_promotion_schedules';
+    END IF;
+
+    RETURN NEW;
+END
+$$;
+
+DROP TRIGGER IF EXISTS trg_promotions_campaign_schedule ON promotions;
+CREATE TRIGGER trg_promotions_campaign_schedule
+BEFORE INSERT OR UPDATE OF project_id, campaign_id, scheduled_start_at, scheduled_end_at
+ON promotions
+FOR EACH ROW
+EXECUTE FUNCTION enforce_promotion_campaign_schedule();
+
+DROP TRIGGER IF EXISTS trg_campaigns_promotion_schedules ON campaigns;
+CREATE TRIGGER trg_campaigns_promotion_schedules
+BEFORE UPDATE OF start_date, end_date
+ON campaigns
+FOR EACH ROW
+EXECUTE FUNCTION enforce_campaign_promotion_schedules();
 
 -- =========================================================
 -- 3. Segment Query Previews
