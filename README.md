@@ -83,6 +83,31 @@ docker compose \
 
 기본 Compose와 운영 환경은 변경하지 않으며, fixture에서만 pgvector 이미지를 사용합니다.
 
+### 실험 평가 시연 fixture
+
+이미영 기획자가 과거에 운영한 이력처럼 확인할 수 있도록 기존 캠페인을 수정하지 않고 `demo_project`에 `여름 성수기 지역 숙박 예약 전환 캠페인` 전체 계층을 별도로 생성합니다. 캠페인 아래에는 고객군 분석, 광고 소재, 배정, 실험, 이벤트, 평가가 연결된 세 가지 프로모션이 포함됩니다.
+
+| 프로모션 | 평가 | 고정 퍼널 | 주요 관측 이탈 |
+|---|---|---|---|
+| 부산 주중 2박 연박 할인 | 목표 달성 | 184 → 157 → 129 → 71 → 29명 | 목표 달성 후 전략 유지 |
+| 강릉 가족여행 조식 패키지 | 목표 미달 | 156 → 63 → 52 → 27 → 11명 | 광고 랜딩 → 숙소 탐색 |
+| 여수 오션뷰 주말 얼리버드 | 목표 미달 | 173 → 151 → 126 → 79 → 12명 | 예약 시작 → 예약 완료 |
+
+Dashboard fixture DB를 시작한 다음 아래 명령으로 전용 캠페인을 생성합니다. 시드는 고정 ID를 사용해 재실행할 수 있고, 삭제·갱신 범위는 해당 캠페인의 assignment와 fixture event로 한정됩니다.
+
+```bash
+./scripts/seed_demo_experiment_funnel.sh
+```
+
+AWS dev는 먼저 읽기 전용 preflight를 실행한 뒤 명시적으로 적용합니다. 대상 AWS 계정, Aurora cluster, ClickHouse instance를 코드에서 검증하며 secret 값은 출력하지 않습니다.
+
+```bash
+python3 scripts/seed_demo_historical_campaign.py
+python3 scripts/seed_demo_historical_campaign.py --apply
+```
+
+PostgreSQL의 `assignment_source = 'fixture'`, ClickHouse의 `source = 'fixture'`, 평가의 `diagnosis.data_origin.kind = 'demo_fixture'`로 실제 운영 데이터와 구분합니다. 이 시드는 local/AWS dev 시연 전용이며 운영 migration 목록에는 포함하지 않습니다.
+
 ## 현재 계약 요약
 
 PostgreSQL은 `Campaign -> Promotion -> Segment -> Ad Experiment` 실행 상태를 저장하며, ANN segment matching을 위해 `pgvector` extension을 사용합니다. 핵심 테이블은 `campaigns`, `promotions`, `promotion_analyses`, `promotion_target_segments`, `generation_runs`, `content_candidates`, `promotion_runs`, `ad_experiments`, `promotion_evaluations`, `next_loop_preparations`, `user_segment_assignments`, `segment_query_previews`, `segment_definitions`입니다.
