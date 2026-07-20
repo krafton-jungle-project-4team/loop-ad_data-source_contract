@@ -8,7 +8,7 @@ import hashlib
 import json
 import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -66,13 +66,15 @@ class Scenario:
     destination: str
     hotel_id: str
     stage_counts: tuple[int, int, int, int, int]
+    loop_count: int
     expected_status: str
     improvement_directions: tuple[str, ...]
     schedule_start_days_ago: int
     schedule_end_days_ago: int
+    change_summary: str | None = None
 
 
-SCENARIOS = (
+BASE_SCENARIOS = (
     Scenario(
         key="busan_weekday",
         promotion_id="promo_demo_busan_weekday_stay",
@@ -117,13 +119,14 @@ SCENARIOS = (
         destination="busan",
         hotel_id="busan-haeundae-ocean-011",
         stage_counts=(184, 157, 129, 71, 29),
+        loop_count=1,
         expected_status="goal_met",
         improvement_directions=(
             "부산 주중 연박 고객군과 2박 할인 메시지 조합을 다음 캠페인에도 유지",
             "예약 완료 고객의 재방문 시점을 확인해 후속 지역 추천에 활용",
         ),
-        schedule_start_days_ago=65,
-        schedule_end_days_ago=50,
+        schedule_start_days_ago=115,
+        schedule_end_days_ago=100,
     ),
     Scenario(
         key="gangneung_family",
@@ -169,13 +172,14 @@ SCENARIOS = (
         destination="gangneung",
         hotel_id="gangneung-gyeongpo-family-007",
         stage_counts=(156, 63, 52, 27, 11),
+        loop_count=1,
         expected_status="goal_not_met",
         improvement_directions=(
             "이메일에서 약속한 가족 조식 조건이 랜딩 첫 화면에 바로 보이는지 점검",
             "숙소 검색으로 이어지는 버튼 문구와 강릉 필터 적용 상태를 확인",
         ),
-        schedule_start_days_ago=48,
-        schedule_end_days_ago=33,
+        schedule_start_days_ago=92,
+        schedule_end_days_ago=80,
     ),
     Scenario(
         key="yeosu_oceanview",
@@ -221,14 +225,133 @@ SCENARIOS = (
         destination="yeosu",
         hotel_id="yeosu-ocean-terrace-014",
         stage_counts=(173, 151, 126, 79, 12),
+        loop_count=1,
         expected_status="goal_not_met",
         improvement_directions=(
             "예약 시작 이후 결제 실패·가격 변경·객실 소진 이벤트를 추가 수집해 직접 원인을 확인",
             "예약 화면에서 최종 결제 금액과 무료 취소 조건이 일관되게 표시되는지 점검",
         ),
-        schedule_start_days_ago=31,
-        schedule_end_days_ago=16,
+        schedule_start_days_ago=52,
+        schedule_end_days_ago=43,
     ),
+)
+
+BUSAN_WEEKDAY, GANGNEUNG_FAMILY_1, YEOSU_OCEANVIEW_1 = BASE_SCENARIOS
+
+GANGNEUNG_FAMILY_2 = replace(
+    GANGNEUNG_FAMILY_1,
+    key="gangneung_family_loop_2",
+    analysis_id="analysis_demo_gangneung_family_breakfast_loop_2",
+    generation_id="generation_demo_gangneung_family_breakfast_loop_2",
+    promotion_run_id="prun_demo_gangneung_family_breakfast_loop_2",
+    content_id="content_demo_gangneung_family_email_loop_2",
+    content_option_id="option_demo_gangneung_family_email_loop_2",
+    ad_experiment_id="adexp_demo_gangneung_family_breakfast_loop_2",
+    evaluation_id="eval_demo_gangneung_family_breakfast_loop_2",
+    message_brief=(
+        "1차 실험의 랜딩 이탈을 반영해 이메일과 랜딩 첫 화면에 가족 조식 "
+        "포함 조건을 동일하게 표시하고 강릉 검색 버튼을 바로 노출합니다."
+    ),
+    subject="강릉 가족 조식 포함 객실, 조건 그대로 확인하세요",
+    preheader="이메일에서 본 조식 조건으로 바로 검색할 수 있어요.",
+    title="강릉 가족 조식 패키지를 바로 비교하세요",
+    body=(
+        "성인 2인과 아동 1인 조식 포함 조건을 랜딩 첫 화면에서도 그대로 "
+        "확인하고 강릉 가족 객실만 바로 비교해 보세요."
+    ),
+    cta="강릉 가족 객실 바로 검색",
+    stage_counts=(152, 121, 101, 65, 24),
+    loop_count=2,
+    expected_status="goal_met",
+    improvement_directions=(
+        "가족 조식 조건과 강릉 검색 CTA를 일치시킨 메시지 조합 유지",
+        "예약 완료 고객의 가족여행 시점을 다음 지역 추천에 활용",
+    ),
+    schedule_start_days_ago=72,
+    schedule_end_days_ago=60,
+    change_summary=(
+        "가족 조식 포함 조건을 이메일과 랜딩에 일치시키고 강릉 검색 CTA를 "
+        "첫 화면에 노출"
+    ),
+)
+
+YEOSU_OCEANVIEW_2 = replace(
+    YEOSU_OCEANVIEW_1,
+    key="yeosu_oceanview_loop_2",
+    analysis_id="analysis_demo_yeosu_oceanview_earlybird_loop_2",
+    generation_id="generation_demo_yeosu_oceanview_earlybird_loop_2",
+    promotion_run_id="prun_demo_yeosu_oceanview_earlybird_loop_2",
+    content_id="content_demo_yeosu_oceanview_email_loop_2",
+    content_option_id="option_demo_yeosu_oceanview_email_loop_2",
+    ad_experiment_id="adexp_demo_yeosu_oceanview_earlybird_loop_2",
+    evaluation_id="eval_demo_yeosu_oceanview_earlybird_loop_2",
+    message_brief=(
+        "1차 실험의 예약 완료 이탈을 반영해 최종 결제 금액과 무료 취소 "
+        "기한을 예약 화면에 고정 표시합니다."
+    ),
+    subject="여수 오션뷰 12% 할인, 결제 금액까지 미리 확인",
+    preheader="무료 취소 기한과 최종 금액을 예약 전에 확인하세요.",
+    title="가격과 취소 조건이 분명한 여수 얼리버드",
+    body=(
+        "여수 오션뷰 얼리버드 12% 할인 객실의 최종 결제 금액과 무료 취소 "
+        "기한을 예약 전에 한 번에 확인하세요."
+    ),
+    cta="조건 확인하고 예약하기",
+    stage_counts=(168, 148, 124, 83, 18),
+    loop_count=2,
+    expected_status="goal_not_met",
+    improvement_directions=(
+        "객실 소진과 가격 변경 여부를 예약 시작 전에 확인할 수 있도록 안내 강화",
+        "결제 단계 입력 항목과 오류 발생 지점을 추가로 점검",
+    ),
+    schedule_start_days_ago=37,
+    schedule_end_days_ago=28,
+    change_summary="최종 결제 금액과 무료 취소 기한을 예약 화면에 고정 표시",
+)
+
+YEOSU_OCEANVIEW_3 = replace(
+    YEOSU_OCEANVIEW_1,
+    key="yeosu_oceanview_loop_3",
+    analysis_id="analysis_demo_yeosu_oceanview_earlybird_loop_3",
+    generation_id="generation_demo_yeosu_oceanview_earlybird_loop_3",
+    promotion_run_id="prun_demo_yeosu_oceanview_earlybird_loop_3",
+    content_id="content_demo_yeosu_oceanview_email_loop_3",
+    content_option_id="option_demo_yeosu_oceanview_email_loop_3",
+    ad_experiment_id="adexp_demo_yeosu_oceanview_earlybird_loop_3",
+    evaluation_id="eval_demo_yeosu_oceanview_earlybird_loop_3",
+    message_brief=(
+        "2차 실험의 결제 이탈을 반영해 객실 소진·가격 변경 안내를 예약 전에 "
+        "제공하고 결제 입력 단계를 줄입니다."
+    ),
+    subject="여수 오션뷰 객실 확보, 간편 예약으로 마무리하세요",
+    preheader="가격 변경 여부를 확인하고 줄어든 단계로 예약하세요.",
+    title="여수 오션뷰 얼리버드, 간편 예약으로 완료",
+    body=(
+        "현재 예약 가능한 여수 오션뷰 객실과 확정 금액을 먼저 확인하고 "
+        "간소화된 결제 단계로 예약을 마무리하세요."
+    ),
+    cta="간편 예약 완료하기",
+    stage_counts=(165, 147, 127, 91, 25),
+    loop_count=3,
+    expected_status="goal_met",
+    improvement_directions=(
+        "예약 전 객실·가격 확인과 간소화된 결제 흐름을 후속 캠페인에도 유지",
+        "예약 완료 고객의 오션뷰 선호를 다음 숙박 추천에 활용",
+    ),
+    schedule_start_days_ago=22,
+    schedule_end_days_ago=12,
+    change_summary=(
+        "객실 소진·가격 변경 여부를 예약 전에 안내하고 결제 입력 단계를 축소"
+    ),
+)
+
+SCENARIOS = (
+    BUSAN_WEEKDAY,
+    GANGNEUNG_FAMILY_1,
+    GANGNEUNG_FAMILY_2,
+    YEOSU_OCEANVIEW_1,
+    YEOSU_OCEANVIEW_2,
+    YEOSU_OCEANVIEW_3,
 )
 
 
@@ -350,6 +473,49 @@ def _scenario_times(scenario: Scenario, today: date) -> tuple[datetime, datetime
     return start, end
 
 
+def _promotion_scenarios(promotion_id: str) -> tuple[Scenario, ...]:
+    return tuple(
+        scenario for scenario in SCENARIOS if scenario.promotion_id == promotion_id
+    )
+
+
+def _promotion_schedule(
+    promotion_id: str,
+    today: date,
+) -> tuple[datetime, datetime]:
+    schedules = [
+        _scenario_times(scenario, today)
+        for scenario in _promotion_scenarios(promotion_id)
+    ]
+    return min(start for start, _ in schedules), max(end for _, end in schedules)
+
+
+def _previous_scenario(scenario: Scenario) -> Scenario | None:
+    if scenario.loop_count == 1:
+        return None
+    return next(
+        (
+            candidate
+            for candidate in SCENARIOS
+            if candidate.promotion_id == scenario.promotion_id
+            and candidate.loop_count == scenario.loop_count - 1
+        ),
+        None,
+    )
+
+
+def _next_scenario(scenario: Scenario) -> Scenario | None:
+    return next(
+        (
+            candidate
+            for candidate in SCENARIOS
+            if candidate.promotion_id == scenario.promotion_id
+            and candidate.loop_count == scenario.loop_count + 1
+        ),
+        None,
+    )
+
+
 def _preflight_project(
     connection: psycopg.Connection[Any],
 ) -> tuple[str, bool]:
@@ -377,8 +543,8 @@ def _upsert_hierarchy(
     connection: psycopg.Connection[Any],
     today: date,
 ) -> dict[str, dict[str, Any]]:
-    campaign_start = today - timedelta(days=70)
-    campaign_end = today - timedelta(days=15)
+    campaign_start = today - timedelta(days=120)
+    campaign_end = today - timedelta(days=10)
     with connection.cursor() as cursor:
         cursor.execute(
             """
@@ -415,6 +581,18 @@ def _upsert_hierarchy(
 
         for scenario in SCENARIOS:
             schedule_start, schedule_end = _scenario_times(scenario, today)
+            promotion_schedule_start, promotion_schedule_end = _promotion_schedule(
+                scenario.promotion_id,
+                today,
+            )
+            promotion_scenarios = _promotion_scenarios(scenario.promotion_id)
+            promotion_max_loop_count = max(
+                item.loop_count for item in promotion_scenarios
+            )
+            promotion_status = max(
+                promotion_scenarios,
+                key=lambda item: item.loop_count,
+            ).expected_status
             result_status = scenario.expected_status
             scope = [scenario.segment_id]
             scope_json = _canonical_json(scope)
@@ -429,6 +607,7 @@ def _upsert_hierarchy(
                 "historical_campaign": True,
                 "persona": "이미영",
                 "destination": scenario.destination,
+                "repeat_experiment_count": promotion_max_loop_count,
             }
 
             cursor.execute(
@@ -443,7 +622,7 @@ def _upsert_hierarchy(
                     loop_interval_unit, loop_interval_value
                 ) VALUES (
                     %s, %s, %s, 'email', %s, 'existing_users',
-                    'booking_conversion_rate', %s, 'all_segments', %s, 3,
+                    'booking_conversion_rate', %s, 'all_segments', %s, %s,
                     %s, %s, %s, 'search_page', %s, %s, %s,
                     'manual', %s, %s, 'day', 7
                 )
@@ -479,14 +658,15 @@ def _upsert_hierarchy(
                     scenario.promotion_name,
                     TARGET_VALUE,
                     MIN_SAMPLE_SIZE,
+                    promotion_max_loop_count,
                     scenario.message_brief,
                     scenario.offer_type,
                     scenario.landing_url,
                     Jsonb({"currency": "KRW", "max_daily_budget": 350000}),
                     Jsonb(metadata),
-                    result_status,
-                    schedule_start,
-                    schedule_end,
+                    promotion_status,
+                    promotion_schedule_start,
+                    promotion_schedule_end,
                 ),
             )
 
@@ -634,7 +814,7 @@ def _upsert_hierarchy(
                 "promotion_id": scenario.promotion_id,
                 "analysis_id": scenario.analysis_id,
                 "channel": "email",
-                "loop_count": 1,
+                "loop_count": scenario.loop_count,
                 "content_option_count": 1,
                 "operator_instruction": scenario.message_brief,
                 "fixture_id": FIXTURE_ID,
@@ -748,7 +928,14 @@ def _upsert_hierarchy(
                     scenario.landing_url,
                     f"{scenario.segment_name}에게 지역 혜택을 명확히 전달하는 이메일",
                     f"{scenario.natural_language_query}의 예약 전환을 위한 맞춤 메시지입니다.",
-                    Jsonb({"fixture_id": FIXTURE_ID, "audience_size": response_count}),
+                    Jsonb(
+                        {
+                            "fixture_id": FIXTURE_ID,
+                            "audience_size": response_count,
+                            "loop_count": scenario.loop_count,
+                            "change_summary": scenario.change_summary,
+                        }
+                    ),
                     "destination_offer_match",
                     Jsonb(metadata),
                     generation_finished_at,
@@ -765,7 +952,7 @@ def _upsert_hierarchy(
                     segment_scope_fingerprint, started_at, ended_at,
                     created_at, updated_at
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, 1, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s
                 )
                 ON CONFLICT (promotion_run_id) DO UPDATE SET
@@ -790,11 +977,13 @@ def _upsert_hierarchy(
                     scenario.promotion_id,
                     scenario.analysis_id,
                     scenario.generation_id,
+                    scenario.loop_count,
                     result_status,
                     Jsonb(
                         {
                             "goal_metric": "booking_conversion_rate",
-                            "target": str(TARGET_VALUE),
+                            "goal_target_value": str(TARGET_VALUE),
+                            "goal_basis": "all_segments",
                             "min_sample_size": MIN_SAMPLE_SIZE,
                         }
                     ),
@@ -817,7 +1006,7 @@ def _upsert_hierarchy(
                     goal_basis, started_at, ended_at, created_at, updated_at
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    'email', 1, %s, 'booking_conversion_rate', %s,
+                    'email', %s, %s, 'booking_conversion_rate', %s,
                     'all_segments', %s, %s, %s, %s
                 )
                 ON CONFLICT (ad_experiment_id) DO UPDATE SET
@@ -853,6 +1042,7 @@ def _upsert_hierarchy(
                     scenario.segment_name,
                     scenario.content_id,
                     scenario.content_option_id,
+                    scenario.loop_count,
                     result_status,
                     TARGET_VALUE,
                     started_at,
@@ -1191,19 +1381,47 @@ def _build_diagnosis(
         key=lambda item: (item["dropoff_count"], item["dropoff_rate"]),
     )
     actual_value = Decimal(booking_complete) / Decimal(response)
+    previous = _previous_scenario(scenario)
+    previous_value = (
+        None
+        if previous is None
+        else Decimal(previous.stage_counts[4]) / Decimal(previous.stage_counts[0])
+    )
+    improvement_percentage_points = (
+        None
+        if previous_value is None
+        else ((actual_value - previous_value) * Decimal(100)).quantize(
+            Decimal("0.01")
+        )
+    )
     status = "goal_met" if actual_value >= TARGET_VALUE else "goal_not_met"
     gap_percentage_points = max(
         (TARGET_VALUE - actual_value) * Decimal(100), Decimal(0)
     ).quantize(Decimal("0.01"))
     if status == "goal_met":
-        summary = (
-            f"예약 완료율 {actual_value * 100:.2f}%로 "
-            f"목표 {TARGET_VALUE * 100:.2f}%를 달성했습니다."
-        )
+        if previous is None:
+            summary = (
+                f"예약 완료율 {actual_value * 100:.2f}%로 "
+                f"목표 {TARGET_VALUE * 100:.2f}%를 달성했습니다."
+            )
+        else:
+            summary = (
+                f"{scenario.loop_count}번째 실험에서 '{scenario.change_summary}' 변경안을 "
+                f"적용했습니다. 예약 완료율은 이전 실험 {previous_value * 100:.2f}%에서 "
+                f"{actual_value * 100:.2f}%로 {improvement_percentage_points}%p 개선되어 "
+                f"목표 {TARGET_VALUE * 100:.2f}%를 달성했습니다."
+            )
         bottleneck = "none"
     else:
+        comparison = ""
+        if previous is not None:
+            comparison = (
+                f"{scenario.loop_count}번째 실험에서 '{scenario.change_summary}' 변경안을 "
+                f"적용해 이전 실험 {previous_value * 100:.2f}%보다 "
+                f"{improvement_percentage_points}%p 개선됐지만, "
+            )
         summary = (
-            f"예약 완료율 {actual_value * 100:.2f}%로 목표 "
+            f"{comparison}예약 완료율 {actual_value * 100:.2f}%로 목표 "
             f"{TARGET_VALUE * 100:.2f}%보다 {gap_percentage_points}%p 낮습니다. "
             f"가장 큰 관측 이탈은 {largest_dropoff['from_stage_label']}에서 "
             f"{largest_dropoff['to_stage_label']} 단계로 넘어가는 구간으로, "
@@ -1239,6 +1457,14 @@ def _build_diagnosis(
             else f"목표 대비 {gap_percentage_points}%p 부족"
         ),
     ]
+    if previous is not None:
+        evidence.insert(
+            1,
+            (
+                f"이전 {previous.loop_count}번째 실험 {previous_value * 100:.2f}% 대비 "
+                f"{improvement_percentage_points}%p 개선"
+            ),
+        )
     diagnosis = {
         "version": "dec.evaluation-diagnosis.v2",
         "status": status,
@@ -1255,6 +1481,19 @@ def _build_diagnosis(
         },
         "limitations": limitations,
         "data_origin": {"kind": "demo_fixture", "label": "시연 데이터"},
+        "experiment_iteration": {
+            "loop_count": scenario.loop_count,
+            "change_summary": scenario.change_summary,
+            "previous_loop_count": None if previous is None else previous.loop_count,
+            "previous_actual_value": (
+                None if previous_value is None else float(previous_value)
+            ),
+            "improvement_percentage_points": (
+                None
+                if improvement_percentage_points is None
+                else float(improvement_percentage_points)
+            ),
+        },
         "funnel": {
             "counting_method": "cumulative_user_reach_after_ad_response",
             "stages": stages,
@@ -1369,6 +1608,75 @@ def _upsert_evaluation(
         )
 
 
+def _upsert_repeat_lineage(
+    connection: psycopg.Connection[Any],
+    experiments: dict[str, dict[str, Any]],
+) -> None:
+    with connection.cursor() as cursor:
+        for scenario in SCENARIOS:
+            previous = _previous_scenario(scenario)
+            if previous is None:
+                continue
+            cursor.execute(
+                """
+                UPDATE ad_experiments
+                SET parent_ad_experiment_id = %s,
+                    source_evaluation_id = %s,
+                    updated_at = %s
+                WHERE ad_experiment_id = %s
+                  AND project_id = %s
+                  AND campaign_id = %s
+                """,
+                (
+                    previous.ad_experiment_id,
+                    previous.evaluation_id,
+                    experiments[scenario.ad_experiment_id]["ended_at"],
+                    scenario.ad_experiment_id,
+                    PROJECT_ID,
+                    CAMPAIGN_ID,
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO next_loop_preparations (
+                    next_loop_preparation_id, source_promotion_run_id,
+                    analysis_id, generation_id, attempt_no,
+                    failed_segment_ids_json, failed_ad_experiment_ids_json,
+                    source_evaluation_ids_json, status,
+                    activated_promotion_run_id, created_at, updated_at
+                ) VALUES (
+                    %s, %s, %s, %s, 1, %s, %s, %s, 'activated', %s, %s, %s
+                )
+                ON CONFLICT (next_loop_preparation_id) DO UPDATE SET
+                    source_promotion_run_id = EXCLUDED.source_promotion_run_id,
+                    analysis_id = EXCLUDED.analysis_id,
+                    generation_id = EXCLUDED.generation_id,
+                    attempt_no = EXCLUDED.attempt_no,
+                    failed_segment_ids_json = EXCLUDED.failed_segment_ids_json,
+                    failed_ad_experiment_ids_json =
+                        EXCLUDED.failed_ad_experiment_ids_json,
+                    source_evaluation_ids_json = EXCLUDED.source_evaluation_ids_json,
+                    status = EXCLUDED.status,
+                    activated_promotion_run_id = EXCLUDED.activated_promotion_run_id,
+                    updated_at = EXCLUDED.updated_at
+                """,
+                (
+                    f"prep_{scenario.ad_experiment_id}",
+                    previous.promotion_run_id,
+                    scenario.analysis_id,
+                    scenario.generation_id,
+                    Jsonb([previous.segment_id]),
+                    Jsonb([previous.ad_experiment_id]),
+                    Jsonb([previous.evaluation_id]),
+                    scenario.promotion_run_id,
+                    experiments[scenario.ad_experiment_id]["started_at"]
+                    - timedelta(hours=1),
+                    experiments[scenario.ad_experiment_id]["started_at"]
+                    - timedelta(hours=1),
+                ),
+            )
+
+
 def _verify_postgres(
     connection: psycopg.Connection[Any],
 ) -> list[dict[str, Any]]:
@@ -1378,7 +1686,12 @@ def _verify_postgres(
             SELECT
                 c.name AS campaign_name,
                 p.marketing_theme AS promotion_name,
+                ae.ad_experiment_id,
                 ae.segment_name,
+                ae.loop_count,
+                ae.parent_ad_experiment_id,
+                ae.source_evaluation_id,
+                preparation.activated_promotion_run_id AS next_promotion_run_id,
                 count(usa.user_id)::int AS assignment_count,
                 pe.status AS evaluation_status,
                 pe.numerator_count,
@@ -1398,14 +1711,20 @@ def _verify_postgres(
               ON usa.project_id = ae.project_id
              AND usa.promotion_run_id = ae.promotion_run_id
              AND usa.ad_experiment_id = ae.ad_experiment_id
+            LEFT JOIN next_loop_preparations preparation
+              ON preparation.source_promotion_run_id = ae.promotion_run_id
+             AND preparation.status = 'activated'
             WHERE c.project_id = %s
               AND c.campaign_id = %s
               AND pe.evaluation_id = ANY(%s)
             GROUP BY
-                c.name, p.marketing_theme, ae.segment_name, pe.status,
+                c.name, p.marketing_theme, ae.ad_experiment_id,
+                ae.segment_name, ae.loop_count, ae.parent_ad_experiment_id,
+                ae.source_evaluation_id, preparation.activated_promotion_run_id,
+                pe.status,
                 pe.numerator_count, pe.denominator_count, pe.result_json,
                 p.scheduled_start_at
-            ORDER BY p.scheduled_start_at
+            ORDER BY p.scheduled_start_at, ae.loop_count
             """,
             (
                 PROJECT_ID,
@@ -1433,8 +1752,8 @@ def _dashboard_url(scenario: Scenario) -> str:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Create a dedicated historical campaign with three evaluation funnels "
-            "in LoopAd local or AWS dev."
+            "Create a dedicated historical campaign with six repeat-experiment "
+            "funnels in LoopAd local or AWS dev."
         )
     )
     parser.add_argument(
@@ -1503,7 +1822,8 @@ def main() -> None:
                 scenario.stage_counts[0]
             )
             print(
-                f"planned {scenario.promotion_name}: funnel={scenario.stage_counts} "
+                f"planned {scenario.promotion_name} loop={scenario.loop_count}: "
+                f"funnel={scenario.stage_counts} "
                 f"actual={actual * 100:.2f}% status={scenario.expected_status}"
             )
         if not args.apply:
@@ -1548,23 +1868,53 @@ def main() -> None:
                     experiments[scenario.ad_experiment_id],
                     counts_by_scenario[scenario.key],
                 )
+            _upsert_repeat_lineage(postgres_connection, experiments)
 
         verified = _verify_postgres(postgres_connection)
         if len(verified) != len(SCENARIOS):
             raise RuntimeError(
                 f"expected {len(SCENARIOS)} verified experiments, found {len(verified)}"
             )
-        for row in verified:
+        verified_by_experiment = {
+            row["ad_experiment_id"]: row for row in verified
+        }
+        for scenario in SCENARIOS:
+            row = verified_by_experiment[scenario.ad_experiment_id]
             if row["data_origin"] != "demo_fixture":
                 raise RuntimeError(f"missing demo fixture marker: {row}")
+            if row["loop_count"] != scenario.loop_count:
+                raise RuntimeError(f"loop count mismatch: {row}")
+            if row["assignment_count"] != scenario.stage_counts[0]:
+                raise RuntimeError(f"assignment count mismatch: {row}")
+            if row["evaluation_status"] != scenario.expected_status:
+                raise RuntimeError(f"evaluation status mismatch: {row}")
+            if (
+                row["numerator_count"],
+                row["denominator_count"],
+            ) != (scenario.stage_counts[4], scenario.stage_counts[0]):
+                raise RuntimeError(f"evaluation count mismatch: {row}")
+            previous = _previous_scenario(scenario)
+            expected_parent = None if previous is None else previous.ad_experiment_id
+            expected_source = None if previous is None else previous.evaluation_id
+            if row["parent_ad_experiment_id"] != expected_parent:
+                raise RuntimeError(f"parent experiment mismatch: {row}")
+            if row["source_evaluation_id"] != expected_source:
+                raise RuntimeError(f"source evaluation mismatch: {row}")
+            following = _next_scenario(scenario)
+            expected_next_run = (
+                None if following is None else following.promotion_run_id
+            )
+            if row["next_promotion_run_id"] != expected_next_run:
+                raise RuntimeError(f"next promotion run mismatch: {row}")
             print(
-                f"verified {row['promotion_name']}: "
+                f"verified {row['promotion_name']} loop={row['loop_count']}: "
                 f"assignments={row['assignment_count']} "
                 f"result={row['numerator_count']}/{row['denominator_count']} "
                 f"status={row['evaluation_status']}"
             )
         print(f"campaign_id={CAMPAIGN_ID}")
-        print(f"dashboard={_dashboard_url(SCENARIOS[1])}")
+        print(f"dashboard_gangneung={_dashboard_url(GANGNEUNG_FAMILY_1)}")
+        print(f"dashboard_yeosu={_dashboard_url(YEOSU_OCEANVIEW_1)}")
     finally:
         clickhouse_client.close()
         postgres_connection.close()
