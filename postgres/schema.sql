@@ -1,6 +1,6 @@
 -- =========================================================
--- Loop-Ad PostgreSQL Schema Contract v1.10
--- Draft: promotion scope, Generation v1, and lean Segment Audience allocation contracts
+-- Loop-Ad PostgreSQL Schema Contract v1.11
+-- Promotion scheduling, automatic loop execution, and existing execution contracts
 -- Owner: loop-ad_data-source_contract
 -- Domain: hotel / accommodation booking
 --
@@ -275,6 +275,14 @@ CREATE TABLE IF NOT EXISTS promotions (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
+    -- Promotion automation columns are appended to preserve the physical
+    -- column order across fresh and expanded databases.
+    execution_mode VARCHAR(20) NOT NULL DEFAULT 'manual',
+    scheduled_start_at TIMESTAMPTZ,
+    scheduled_end_at TIMESTAMPTZ,
+    loop_interval_unit VARCHAR(20) NOT NULL DEFAULT 'day',
+    loop_interval_value INT NOT NULL DEFAULT 1,
+
     CONSTRAINT fk_promotions_project
         FOREIGN KEY (project_id) REFERENCES projects (project_id),
 
@@ -316,6 +324,22 @@ CREATE TABLE IF NOT EXISTS promotions (
 
     CONSTRAINT chk_promotions_max_loop_count
         CHECK (max_loop_count >= 1),
+
+    CONSTRAINT chk_promotions_execution_mode
+        CHECK (execution_mode IN ('manual', 'automatic')),
+
+    CONSTRAINT chk_promotions_schedule
+        CHECK (
+            scheduled_start_at IS NULL
+            OR scheduled_end_at IS NULL
+            OR scheduled_end_at > scheduled_start_at
+        ),
+
+    CONSTRAINT chk_promotions_loop_interval_unit
+        CHECK (loop_interval_unit IN ('hour', 'day')),
+
+    CONSTRAINT chk_promotions_loop_interval_value
+        CHECK (loop_interval_value >= 1),
 
     CONSTRAINT chk_promotions_goal_target_value
         CHECK (goal_target_value >= 0)
@@ -3015,6 +3039,72 @@ WHERE status = 'awaiting_content_approval';
 CREATE UNIQUE INDEX IF NOT EXISTS uq_next_loop_preparations_activated_run
 ON next_loop_preparations (activated_promotion_run_id)
 WHERE activated_promotion_run_id IS NOT NULL;
+
+-- =========================================================
+-- 16a. Promotion Automation Jobs
+-- Durable, lease-based launch and evaluation schedule for promotion runs.
+-- =========================================================
+CREATE TABLE IF NOT EXISTS promotion_automation_jobs (
+    job_id VARCHAR(100) PRIMARY KEY,
+    promotion_run_id VARCHAR(100) NOT NULL,
+    job_type VARCHAR(30) NOT NULL,
+    scheduled_at TIMESTAMPTZ NOT NULL,
+    status VARCHAR(30) NOT NULL DEFAULT 'pending',
+    attempt_count INT NOT NULL DEFAULT 0,
+    worker_id VARCHAR(200),
+    lease_token UUID,
+    locked_at TIMESTAMPTZ,
+    lease_expires_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    last_error_code VARCHAR(100),
+    last_error_detail TEXT,
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT fk_promotion_automation_jobs_run
+        FOREIGN KEY (promotion_run_id) REFERENCES promotion_runs (promotion_run_id),
+
+    CONSTRAINT chk_promotion_automation_jobs_type
+        CHECK (job_type IN ('launch_run', 'evaluate_run')),
+
+    CONSTRAINT chk_promotion_automation_jobs_status
+        CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+
+    CONSTRAINT chk_promotion_automation_jobs_attempt_count
+        CHECK (attempt_count >= 0),
+
+    CONSTRAINT chk_promotion_automation_jobs_metadata
+        CHECK (jsonb_typeof(metadata_json) = 'object'),
+
+    CONSTRAINT chk_promotion_automation_jobs_running_lease
+        CHECK (
+            status <> 'running'
+            OR (
+                worker_id IS NOT NULL
+                AND lease_token IS NOT NULL
+                AND locked_at IS NOT NULL
+                AND lease_expires_at IS NOT NULL
+            )
+        ),
+
+    CONSTRAINT chk_promotion_automation_jobs_completed_at
+        CHECK (
+            status <> 'completed'
+            OR completed_at IS NOT NULL
+        ),
+
+    CONSTRAINT uq_promotion_automation_jobs_run_type
+        UNIQUE (promotion_run_id, job_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_promotion_automation_jobs_claimable
+ON promotion_automation_jobs (scheduled_at, created_at, job_id)
+WHERE status = 'pending';
+
+CREATE INDEX IF NOT EXISTS idx_promotion_automation_jobs_expired_lease
+ON promotion_automation_jobs (lease_expires_at)
+WHERE status = 'running';
 
 -- =========================================================
 -- 17. Segment Assignment Execution Provenance
