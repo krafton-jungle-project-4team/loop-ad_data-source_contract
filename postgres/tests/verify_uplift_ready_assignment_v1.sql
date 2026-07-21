@@ -188,7 +188,7 @@ BEGIN
     END IF;
 
     SELECT pg_get_functiondef(
-        'assert_ad_experiment_unit(character varying)'::regprocedure
+        'assert_uplift_assignment_execution(character varying)'::regprocedure
     ) INTO unit_validator;
 
     IF position('generation.window_end <= unit.assigned_at' IN unit_validator) = 0
@@ -201,6 +201,22 @@ BEGIN
        OR position('generation.source_cutoff_at' IN unit_validator) <> 0
     THEN
         RAISE EXCEPTION 'uplift unit time contract differs';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_trigger
+        WHERE tgrelid IN (
+            'ad_experiment_units'::regclass,
+            'user_segment_assignments'::regclass
+        )
+          AND tgname IN (
+              'trg_validate_ad_experiment_unit',
+              'trg_validate_uplift_ready_serving_assignment'
+          )
+          AND NOT tgisinternal
+    ) THEN
+        RAISE EXCEPTION 'row-level population validation trigger still exists';
     END IF;
 END
 $$;
@@ -501,7 +517,8 @@ INSERT INTO segment_assignment_executions (
     matcher_version,
     vector_version,
     source_cutoff_at,
-    input_manifest_json
+    input_manifest_json,
+    uplift_assignment_status
 ) VALUES (
     'uplift_assignment_execution_v1',
     'uplift_run_v1',
@@ -530,14 +547,18 @@ INSERT INTO segment_assignment_executions (
         ),
         'audience_bindings', jsonb_build_array(
             jsonb_build_object(
+                'ad_experiment_id', 'uplift_ad_experiment_v1',
                 'segment_id', 'seg_near_checkin',
                 'audience_snapshot_id', 'uplift_final_snapshot',
-                'vector_generation_id', 'uplift_vector_generation'
+                'vector_generation_id', 'uplift_vector_generation',
+                'member_count', 2
             )
         ),
         'allocation_results', jsonb_build_array(
             jsonb_build_object(
                 'ad_experiment_id', 'uplift_ad_experiment_v1',
+                'segment_id', 'seg_near_checkin',
+                'audience_snapshot_id', 'uplift_final_snapshot',
                 'unit_count', 2,
                 'treatment_count', 1,
                 'control_count', 1,
@@ -546,7 +567,8 @@ INSERT INTO segment_assignment_executions (
                 'quota_policy_version', 'complete-randomization.v1'
             )
         )
-    )
+    ),
+    'preparing'
 );
 
 INSERT INTO ad_experiment_units (
@@ -626,6 +648,29 @@ INSERT INTO user_segment_assignments (
     'uplift_assignment_execution_v1'
 );
 
+SELECT pg_temp.expect_failure(
+    $sql$WITH changed AS (
+        UPDATE segment_assignment_executions
+        SET input_manifest_json = jsonb_set(
+            input_manifest_json,
+            '{allocation_results,0,treatment_count}',
+            '2'::jsonb
+        )
+        WHERE segment_assignment_execution_id =
+            'uplift_assignment_execution_v1'
+        RETURNING segment_assignment_execution_id
+    )
+    SELECT finalize_uplift_assignment_execution(
+        segment_assignment_execution_id
+    )
+    FROM changed$sql$,
+    '23514'
+);
+
+SELECT finalize_uplift_assignment_execution(
+    'uplift_assignment_execution_v1'
+);
+
 SET CONSTRAINTS ALL IMMEDIATE;
 SET CONSTRAINTS ALL DEFERRED;
 
@@ -641,6 +686,10 @@ BEGIN
              AND arm = 'control') <> 1
        OR (SELECT count(*) FROM user_segment_assignments
            WHERE promotion_run_id = 'uplift_run_v1') <> 1
+       OR (SELECT uplift_assignment_status
+           FROM segment_assignment_executions
+           WHERE segment_assignment_execution_id =
+               'uplift_assignment_execution_v1') <> 'finalized'
     THEN
         RAISE EXCEPTION 'holdout population or serving subset differs';
     END IF;
@@ -682,7 +731,8 @@ INSERT INTO segment_assignment_executions (
     matcher_version,
     vector_version,
     source_cutoff_at,
-    input_manifest_json
+    input_manifest_json,
+    uplift_assignment_status
 )
 SELECT
     'uplift_assignment_execution_same_design',
@@ -693,7 +743,8 @@ SELECT
     matcher_version,
     vector_version,
     source_cutoff_at,
-    input_manifest_json
+    input_manifest_json,
+    'preparing'
 FROM segment_assignment_executions
 WHERE segment_assignment_execution_id = 'uplift_assignment_execution_v1';
 
@@ -710,7 +761,8 @@ SELECT pg_temp.expect_deferred_failure(
         matcher_version,
         vector_version,
         source_cutoff_at,
-        input_manifest_json
+        input_manifest_json,
+        uplift_assignment_status
     )
     SELECT
         'uplift_assignment_execution_conflict',
@@ -729,7 +781,8 @@ SELECT pg_temp.expect_deferred_failure(
             ),
             '{experiment_design_fingerprint}',
             to_jsonb(repeat('e', 64))
-        )
+        ),
+        'preparing'
     FROM segment_assignment_executions
     WHERE segment_assignment_execution_id =
         'uplift_assignment_execution_v1'$sql$,
@@ -737,16 +790,73 @@ SELECT pg_temp.expect_deferred_failure(
     '23514'
 );
 
-SELECT pg_temp.expect_deferred_failure(
+SELECT pg_temp.expect_failure(
     $sql$UPDATE ad_experiment_units
          SET assigned_at = '2026-07-09 00:00:00+00',
              outcome_window_start = '2026-07-09 00:00:00+00'
          WHERE experiment_unit_id = 'uplift_unit_control'$sql$,
-    'trg_validate_ad_experiment_unit',
     '23514'
 );
 
-SELECT pg_temp.expect_deferred_failure(
+SELECT pg_temp.expect_failure(
+    $sql$DELETE FROM ad_experiment_units
+         WHERE experiment_unit_id = 'uplift_unit_control'$sql$,
+    '23514'
+);
+
+SELECT pg_temp.expect_failure(
+    $sql$INSERT INTO ad_experiment_units (
+        experiment_unit_id,
+        project_id,
+        promotion_run_id,
+        ad_experiment_id,
+        segment_id,
+        audience_snapshot_id,
+        vector_generation_id,
+        segment_assignment_execution_id,
+        user_id,
+        arm,
+        treatment_probability,
+        assigned_at,
+        outcome_window_start,
+        outcome_window_end
+    )
+    SELECT
+        'uplift_unit_late_insert',
+        project_id,
+        promotion_run_id,
+        ad_experiment_id,
+        segment_id,
+        audience_snapshot_id,
+        vector_generation_id,
+        segment_assignment_execution_id,
+        'uplift_late_user',
+        'control',
+        treatment_probability,
+        assigned_at,
+        outcome_window_start,
+        outcome_window_end
+    FROM ad_experiment_units
+    WHERE experiment_unit_id = 'uplift_unit_control'$sql$,
+    '23514'
+);
+
+SELECT pg_temp.expect_failure(
+    $sql$UPDATE segment_assignment_executions
+         SET input_fingerprint = repeat('f', 64)
+         WHERE segment_assignment_execution_id =
+             'uplift_assignment_execution_v1'$sql$,
+    '23514'
+);
+
+SELECT pg_temp.expect_failure(
+    $sql$DELETE FROM segment_assignment_executions
+         WHERE segment_assignment_execution_id =
+             'uplift_assignment_execution_v1'$sql$,
+    '23514'
+);
+
+SELECT pg_temp.expect_failure(
     $sql$INSERT INTO user_segment_assignments (
         project_id,
         promotion_run_id,
@@ -774,24 +884,21 @@ SELECT pg_temp.expect_deferred_failure(
         '2026-08-14 00:00:00+00',
         'uplift_assignment_execution_v1'
     )$sql$,
-    'trg_validate_uplift_ready_serving_assignment',
     '23514'
 );
 
-SELECT pg_temp.expect_deferred_failure(
+SELECT pg_temp.expect_failure(
     $sql$UPDATE user_segment_assignments
          SET segment_assignment_execution_id = NULL
          WHERE promotion_run_id = 'uplift_run_v1'
            AND user_id = 'uplift_treatment_user'$sql$,
-    'trg_validate_uplift_ready_serving_assignment',
     '23514'
 );
 
-SELECT pg_temp.expect_deferred_failure(
+SELECT pg_temp.expect_failure(
     $sql$DELETE FROM user_segment_assignments
          WHERE promotion_run_id = 'uplift_run_v1'
            AND user_id = 'uplift_treatment_user'$sql$,
-    'trg_validate_uplift_ready_serving_assignment',
     '23514'
 );
 

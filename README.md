@@ -176,10 +176,18 @@ psql -v ON_ERROR_STOP=1 \
 
 Unit은 final `segment_audience_snapshots`와 배정 전
 `user_behavior_vector_search_generations`를 함께 참조합니다. DB deferred validation은
-snapshot member와 Unit의 집합이 같은지, treatment Unit과 serving assignment가 같은지,
-control serving이 없는지, 그리고 generation·snapshot·execution cutoff가
-`assigned_at`보다 늦지 않은지를 검증합니다. `outcome_window_start`는 `assigned_at`과
-같아야 합니다.
+개별 사용자마다 전체 모집단을 다시 조회하지 않습니다. Decision은 execution을
+`preparing`으로 생성하고 Unit과 treatment serving assignment를 일괄 저장한 뒤 같은
+transaction에서 `finalize_uplift_assignment_execution(execution_id)`을 한 번 호출합니다.
+Finalizer는 snapshot member와 Unit의 집합, treatment Unit과 serving assignment,
+control serving 부재, manifest quota와 실제 arm 수, generation·snapshot·execution
+cutoff를 집합 단위로 검증하고 execution을 `finalized`로 봉인합니다.
+`outcome_window_start`는 `assigned_at`과 같아야 합니다.
+
+Finalized execution의 manifest·fingerprint·cutoff와 모든 Experiment Unit은 변경하거나
+삭제할 수 없습니다. Finalized execution에 Unit이나 serving assignment를 추가하는
+것도 거절하며, 기존 treatment serving assignment 역시 변경·삭제할 수 없습니다.
+Legacy execution에는 이 lifecycle과 불변성 trigger를 적용하지 않습니다.
 
 기존 DB에는 Decision의 Uplift-ready assignment 배포 전에 다음 additive migration을
 적용합니다. 기존 execution과 assignment는 backfill하지 않습니다.

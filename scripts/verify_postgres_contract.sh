@@ -258,6 +258,9 @@ psql_file \
 psql_file \
     "${FRESH_DB}" \
     "${ROOT_DIR}/postgres/tests/verify_uplift_ready_assignment_v1.sql"
+psql_file \
+    "${FRESH_DB}" \
+    "${ROOT_DIR}/postgres/tests/benchmark_uplift_assignment_finalization.sql"
 
 log "verifying promotion automation migration from ${REQUESTED_BASE_REF}"
 psql_git_file \
@@ -836,6 +839,10 @@ WITH contract_metadata AS (
     )
       AND attributes.attnum > 0
       AND NOT attributes.attisdropped
+      AND attributes.attname NOT IN (
+          'uplift_assignment_status',
+          'uplift_finalized_at'
+      )
 
     UNION ALL
 
@@ -847,8 +854,10 @@ WITH contract_metadata AS (
       ON classes.oid = constraints.conrelid
     WHERE (
         classes.relname = 'segment_assignment_executions'
-        AND constraints.conname <>
-            'trg_validate_promotion_run_experiment_design'
+        AND constraints.conname NOT IN (
+            'trg_validate_promotion_run_experiment_design',
+            'chk_segment_assignment_executions_uplift_status'
+        )
     )
        OR constraints.conname = 'fk_user_segment_assignments_execution'
 
