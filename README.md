@@ -25,6 +25,7 @@ LoopAd의 로컬 데이터 소스 계약을 공유하는 최소 repo입니다.
 │   ├── backfill_generation_v1.sql
 │   ├── finalize_generation_v1.sql
 │   ├── expand_segment_assignment_execution_provenance.sql
+│   ├── expand_uplift_ready_assignment_v1.sql
 │   ├── expand_promotion_automation_v1.sql
 │   ├── expand_promotion_run_segment_scope.sql
 │   ├── backfill_promotion_run_segment_scope.sql
@@ -34,7 +35,8 @@ LoopAd의 로컬 데이터 소스 계약을 공유하는 최소 repo입니다.
 │   │   ├── verify_generation_v1.sql
 │   │   ├── verify_promotion_automation_v1.sql
 │   │   ├── verify_promotion_run_segment_scope.sql
-│   │   └── verify_segment_assignment_execution_provenance.sql
+│   │   ├── verify_segment_assignment_execution_provenance.sql
+│   │   └── verify_uplift_ready_assignment_v1.sql
 │   └── schema.sql
 ├── scripts/
 │   ├── verify_clickhouse_contract.sh
@@ -162,6 +164,35 @@ psql -v ON_ERROR_STOP=1 \
 
 이 계약에는 status, lifecycle 함수, staging result, publication pointer, trigger 또는
 신규 serving view가 없습니다.
+
+## Uplift-ready assignment contract
+
+`segment_assignment_executions.input_manifest_json`의
+`segment-assignment-execution.v2`가 run의 실험 설계 source of truth입니다. 같은
+`promotion_run_id`에는 request provenance를 여러 개 남길 수 있지만 mode, treatment
+비율, outcome window, randomization version과 frozen outcome spec이 동일해야 합니다.
+`ad_experiment_units`는 final audience 전체의 treatment/control 결과를 저장하고,
+`user_segment_assignments`에는 treatment 발송 대상만 저장합니다.
+
+Unit은 final `segment_audience_snapshots`와 배정 전
+`user_behavior_vector_search_generations`를 함께 참조합니다. DB deferred validation은
+snapshot member와 Unit의 집합이 같은지, treatment Unit과 serving assignment가 같은지,
+control serving이 없는지, 그리고 generation·snapshot·execution cutoff가
+`assigned_at`보다 늦지 않은지를 검증합니다. `outcome_window_start`는 `assigned_at`과
+같아야 합니다.
+
+기존 DB에는 Decision의 Uplift-ready assignment 배포 전에 다음 additive migration을
+적용합니다. 기존 execution과 assignment는 backfill하지 않습니다.
+
+```bash
+psql -X -v ON_ERROR_STOP=1 \
+  "$LOOPAD_POSTGRES_URL" \
+  -f postgres/expand_uplift_ready_assignment_v1.sql
+```
+
+`promotion_runs.goal_snapshot_json`의 `outcome_spec`, `outcome_spec_hash`,
+`outcome_definition_version`은 run 생성 이후 변경할 수 없습니다. 기존 run처럼 해당
+필드가 없는 legacy row는 그대로 유지되며 Uplift 학습 대상이 아닙니다.
 
 ## Deterministic user behavior vector revisions
 
