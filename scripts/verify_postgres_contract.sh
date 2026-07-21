@@ -17,6 +17,7 @@ EXECUTION_BASE_DB="execution_base_contract"
 GENERATION_LEGACY_DB="generation_legacy_contract"
 AUDIENCE_LEGACY_DB="audience_legacy_contract"
 AUTOMATION_LEGACY_DB="automation_legacy_contract"
+UPLIFT_LEGACY_DB="uplift_legacy_contract"
 
 cleanup() {
     docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
@@ -181,6 +182,8 @@ docker exec "${CONTAINER_NAME}" \
     createdb -U "${POSTGRES_USER}" "${AUDIENCE_LEGACY_DB}"
 docker exec "${CONTAINER_NAME}" \
     createdb -U "${POSTGRES_USER}" "${AUTOMATION_LEGACY_DB}"
+docker exec "${CONTAINER_NAME}" \
+    createdb -U "${POSTGRES_USER}" "${UPLIFT_LEGACY_DB}"
 
 log 'verifying fresh schema and rerunnable dummy data'
 psql_file "${FRESH_DB}" "${ROOT_DIR}/postgres/schema.sql"
@@ -189,6 +192,12 @@ for _ in 1 2; do
     psql_file \
         "${FRESH_DB}" \
         "${ROOT_DIR}/postgres/expand_promotion_automation_v1.sql"
+done
+
+for _ in 1 2; do
+    psql_file \
+        "${FRESH_DB}" \
+        "${ROOT_DIR}/postgres/expand_uplift_ready_assignment_v1.sql"
 done
 
 assert_query "${FRESH_DB}" "
@@ -246,6 +255,9 @@ psql_file \
 psql_file \
     "${FRESH_DB}" \
     "${ROOT_DIR}/postgres/tests/verify_promotion_automation_v1.sql"
+psql_file \
+    "${FRESH_DB}" \
+    "${ROOT_DIR}/postgres/tests/verify_uplift_ready_assignment_v1.sql"
 
 log "verifying promotion automation migration from ${REQUESTED_BASE_REF}"
 psql_git_file \
@@ -396,6 +408,12 @@ for _ in 1 2; do
         "${ROOT_DIR}/postgres/expand_promotion_automation_v1.sql"
 done
 
+for _ in 1 2; do
+    psql_file \
+        "${AUDIENCE_LEGACY_DB}" \
+        "${ROOT_DIR}/postgres/expand_uplift_ready_assignment_v1.sql"
+done
+
 normalized_schema_dump() {
     local database="$1"
 
@@ -416,6 +434,35 @@ if [[ "${fresh_audience_schema}" != "${migrated_audience_schema}" ]]; then
     diff -u \
         <(printf '%s\n' "${fresh_audience_schema}") \
         <(printf '%s\n' "${migrated_audience_schema}") >&2 || true
+    exit 1
+fi
+
+log "verifying Uplift-ready assignment migration from ${REQUESTED_BASE_REF}"
+psql_git_file \
+    "${UPLIFT_LEGACY_DB}" \
+    "${REQUESTED_BASE_REF}" \
+    postgres/schema.sql
+psql_git_file \
+    "${UPLIFT_LEGACY_DB}" \
+    "${REQUESTED_BASE_REF}" \
+    postgres/dummy.sql
+
+for _ in 1 2; do
+    psql_file \
+        "${UPLIFT_LEGACY_DB}" \
+        "${ROOT_DIR}/postgres/expand_uplift_ready_assignment_v1.sql"
+done
+
+psql_file \
+    "${UPLIFT_LEGACY_DB}" \
+    "${ROOT_DIR}/postgres/tests/verify_uplift_ready_assignment_v1.sql"
+
+uplift_migrated_schema="$(normalized_schema_dump "${UPLIFT_LEGACY_DB}")"
+if [[ "${fresh_audience_schema}" != "${uplift_migrated_schema}" ]]; then
+    printf 'fresh and migrated Uplift-ready schemas differ\n' >&2
+    diff -u \
+        <(printf '%s\n' "${fresh_audience_schema}") \
+        <(printf '%s\n' "${uplift_migrated_schema}") >&2 || true
     exit 1
 fi
 
@@ -798,7 +845,11 @@ WITH contract_metadata AS (
     FROM pg_constraint AS constraints
     JOIN pg_class AS classes
       ON classes.oid = constraints.conrelid
-    WHERE classes.relname = 'segment_assignment_executions'
+    WHERE (
+        classes.relname = 'segment_assignment_executions'
+        AND constraints.conname <>
+            'trg_validate_promotion_run_experiment_design'
+    )
        OR constraints.conname = 'fk_user_segment_assignments_execution'
 
     UNION ALL
