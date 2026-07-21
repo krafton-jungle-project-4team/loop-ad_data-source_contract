@@ -3277,6 +3277,8 @@ CREATE TABLE IF NOT EXISTS segment_assignment_executions (
     source_cutoff_at TIMESTAMPTZ NOT NULL,
     input_manifest_json JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    uplift_assignment_status VARCHAR(20),
+    uplift_finalized_at TIMESTAMPTZ,
 
     CONSTRAINT fk_segment_assignment_executions_run
         FOREIGN KEY (promotion_run_id)
@@ -3301,6 +3303,31 @@ CREATE TABLE IF NOT EXISTS segment_assignment_executions (
 
     CONSTRAINT chk_segment_assignment_executions_input_manifest
         CHECK (jsonb_typeof(input_manifest_json) = 'object'),
+
+    CONSTRAINT chk_segment_assignment_executions_uplift_status
+        CHECK (
+            (
+                input_manifest_json->>'schema_version' =
+                    'segment-assignment-execution.v2'
+                AND uplift_assignment_status IN ('preparing', 'finalized')
+                AND (
+                    (
+                        uplift_assignment_status = 'preparing'
+                        AND uplift_finalized_at IS NULL
+                    )
+                    OR (
+                        uplift_assignment_status = 'finalized'
+                        AND uplift_finalized_at IS NOT NULL
+                    )
+                )
+            )
+            OR (
+                input_manifest_json->>'schema_version' IS DISTINCT FROM
+                    'segment-assignment-execution.v2'
+                AND uplift_assignment_status IS NULL
+                AND uplift_finalized_at IS NULL
+            )
+        ),
 
     CONSTRAINT uq_segment_assignment_executions_run_request
         UNIQUE (promotion_run_id, request_fingerprint),
@@ -3819,7 +3846,6 @@ AS $$
 BEGIN
     IF TG_OP IN ('UPDATE', 'DELETE') THEN
         PERFORM assert_promotion_run_experiment_design(OLD.promotion_run_id);
-        PERFORM assert_uplift_ready_assignment_population(OLD.promotion_run_id);
     END IF;
 
     IF TG_OP IN ('INSERT', 'UPDATE')
@@ -3830,7 +3856,6 @@ BEGIN
        )
     THEN
         PERFORM assert_promotion_run_experiment_design(NEW.promotion_run_id);
-        PERFORM assert_uplift_ready_assignment_population(NEW.promotion_run_id);
     END IF;
 
     RETURN NULL;
@@ -3964,6 +3989,455 @@ ON user_segment_assignments
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION validate_uplift_ready_serving_assignment_trigger();
+
+-- Uplift v2 validates the complete population once, immediately before the
+-- execution is finalized. The row-level deferred triggers above are removed
+-- so assignment commit cost grows linearly with the population.
+DROP TRIGGER IF EXISTS trg_validate_ad_experiment_unit
+ON ad_experiment_units;
+
+DROP FUNCTION IF EXISTS validate_ad_experiment_unit_trigger();
+DROP FUNCTION IF EXISTS assert_ad_experiment_unit(VARCHAR);
+
+DROP TRIGGER IF EXISTS trg_validate_uplift_ready_serving_assignment
+ON user_segment_assignments;
+
+DROP FUNCTION IF EXISTS validate_uplift_ready_serving_assignment_trigger();
+
+CREATE OR REPLACE FUNCTION assert_uplift_assignment_execution(
+    p_segment_assignment_execution_id VARCHAR(100)
+)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    execution_row segment_assignment_executions%ROWTYPE;
+BEGIN
+    SELECT *
+    INTO execution_row
+    FROM segment_assignment_executions
+    WHERE segment_assignment_execution_id =
+        p_segment_assignment_execution_id
+    FOR UPDATE;
+
+    IF NOT FOUND
+       OR execution_row.input_manifest_json->>'schema_version'
+            IS DISTINCT FROM 'segment-assignment-execution.v2'
+    THEN
+        RAISE EXCEPTION 'uplift-ready assignment execution does not exist: %',
+            p_segment_assignment_execution_id
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF jsonb_typeof(
+        execution_row.input_manifest_json->'allocation_results'
+    ) IS DISTINCT FROM 'array'
+       OR jsonb_typeof(
+            execution_row.input_manifest_json->'audience_bindings'
+       ) IS DISTINCT FROM 'array'
+    THEN
+        RAISE EXCEPTION 'uplift-ready assignment manifest is incomplete: %',
+            p_segment_assignment_execution_id
+            USING ERRCODE = '23514';
+    END IF;
+
+    PERFORM assert_promotion_run_experiment_design(
+        execution_row.promotion_run_id
+    );
+
+    IF EXISTS (
+        SELECT 1
+        FROM ad_experiment_units AS unit
+        JOIN promotion_runs AS run
+          ON run.promotion_run_id = unit.promotion_run_id
+        JOIN ad_experiments AS experiment
+          ON experiment.ad_experiment_id = unit.ad_experiment_id
+        JOIN segment_audience_snapshots AS snapshot
+          ON snapshot.snapshot_id = unit.audience_snapshot_id
+        JOIN user_behavior_vector_search_generations AS generation
+          ON generation.vector_generation_id = unit.vector_generation_id
+        JOIN segment_assignment_executions AS execution
+          ON execution.promotion_run_id = unit.promotion_run_id
+         AND execution.segment_assignment_execution_id =
+             unit.segment_assignment_execution_id
+        JOIN promotion_run_target_bindings AS binding
+          ON binding.promotion_run_id = unit.promotion_run_id
+         AND binding.segment_id = unit.segment_id
+         AND binding.final_snapshot_id = unit.audience_snapshot_id
+        WHERE unit.segment_assignment_execution_id =
+                p_segment_assignment_execution_id
+          AND NOT (
+              unit.project_id = run.project_id
+              AND experiment.project_id = unit.project_id
+              AND experiment.promotion_run_id = unit.promotion_run_id
+              AND experiment.segment_id = unit.segment_id
+              AND snapshot.project_id = unit.project_id
+              AND snapshot.segment_id = unit.segment_id
+              AND snapshot.snapshot_kind = 'final'
+              AND snapshot.vector_generation_id = unit.vector_generation_id
+              AND generation.project_id = unit.project_id
+              AND generation.vector_version = snapshot.vector_version
+              AND execution.vector_version = generation.vector_version
+              AND generation.window_end <= unit.assigned_at
+              AND generation.source_revision_cutoff <= unit.assigned_at
+              AND snapshot.source_cutoff <= unit.assigned_at
+              AND execution.source_cutoff_at <= unit.assigned_at
+          )
+    ) THEN
+        RAISE EXCEPTION
+            'ad experiment unit identity, snapshot, or time contract mismatch: %',
+            p_segment_assignment_execution_id
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF EXISTS (
+        (
+            SELECT
+                binding.segment_id,
+                binding.final_snapshot_id,
+                member.user_id
+            FROM promotion_run_target_bindings AS binding
+            JOIN segment_audience_members AS member
+              ON member.snapshot_id = binding.final_snapshot_id
+            WHERE binding.promotion_run_id = execution_row.promotion_run_id
+            EXCEPT
+            SELECT
+                unit.segment_id,
+                unit.audience_snapshot_id,
+                unit.user_id
+            FROM ad_experiment_units AS unit
+            WHERE unit.segment_assignment_execution_id =
+                p_segment_assignment_execution_id
+        )
+    ) OR EXISTS (
+        (
+            SELECT
+                unit.segment_id,
+                unit.audience_snapshot_id,
+                unit.user_id
+            FROM ad_experiment_units AS unit
+            WHERE unit.segment_assignment_execution_id =
+                p_segment_assignment_execution_id
+            EXCEPT
+            SELECT
+                binding.segment_id,
+                binding.final_snapshot_id,
+                member.user_id
+            FROM promotion_run_target_bindings AS binding
+            JOIN segment_audience_members AS member
+              ON member.snapshot_id = binding.final_snapshot_id
+            WHERE binding.promotion_run_id = execution_row.promotion_run_id
+        )
+    ) THEN
+        RAISE EXCEPTION 'experiment units must equal the final audience: %',
+            p_segment_assignment_execution_id
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF EXISTS (
+        (
+            SELECT
+                unit.user_id,
+                unit.segment_id,
+                unit.ad_experiment_id,
+                unit.assigned_at
+            FROM ad_experiment_units AS unit
+            WHERE unit.segment_assignment_execution_id =
+                    p_segment_assignment_execution_id
+              AND unit.arm = 'treatment'
+            EXCEPT
+            SELECT
+                assignment.user_id,
+                assignment.segment_id,
+                assignment.ad_experiment_id,
+                assignment.assigned_at
+            FROM user_segment_assignments AS assignment
+            WHERE assignment.segment_assignment_execution_id =
+                p_segment_assignment_execution_id
+        )
+    ) OR EXISTS (
+        (
+            SELECT
+                assignment.user_id,
+                assignment.segment_id,
+                assignment.ad_experiment_id,
+                assignment.assigned_at
+            FROM user_segment_assignments AS assignment
+            WHERE assignment.segment_assignment_execution_id =
+                p_segment_assignment_execution_id
+            EXCEPT
+            SELECT
+                unit.user_id,
+                unit.segment_id,
+                unit.ad_experiment_id,
+                unit.assigned_at
+            FROM ad_experiment_units AS unit
+            WHERE unit.segment_assignment_execution_id =
+                    p_segment_assignment_execution_id
+              AND unit.arm = 'treatment'
+        )
+    ) THEN
+        RAISE EXCEPTION 'treatment units and serving assignments differ: %',
+            p_segment_assignment_execution_id
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF EXISTS (
+        WITH manifest_results AS (
+            SELECT *
+            FROM jsonb_to_recordset(
+                execution_row.input_manifest_json->'allocation_results'
+            ) AS result(
+                ad_experiment_id TEXT,
+                segment_id TEXT,
+                audience_snapshot_id TEXT,
+                unit_count INTEGER,
+                treatment_count INTEGER,
+                control_count INTEGER,
+                actual_treatment_ratio NUMERIC
+            )
+        ), manifest_bindings AS (
+            SELECT *
+            FROM jsonb_to_recordset(
+                execution_row.input_manifest_json->'audience_bindings'
+            ) AS binding(
+                ad_experiment_id TEXT,
+                segment_id TEXT,
+                audience_snapshot_id TEXT,
+                vector_generation_id TEXT,
+                member_count INTEGER
+            )
+        ), actual_results AS (
+            SELECT
+                unit.ad_experiment_id,
+                unit.segment_id,
+                unit.audience_snapshot_id,
+                unit.vector_generation_id,
+                count(*)::INTEGER AS unit_count,
+                count(*) FILTER (WHERE unit.arm = 'treatment')::INTEGER
+                    AS treatment_count,
+                count(*) FILTER (WHERE unit.arm = 'control')::INTEGER
+                    AS control_count
+            FROM ad_experiment_units AS unit
+            WHERE unit.segment_assignment_execution_id =
+                p_segment_assignment_execution_id
+            GROUP BY
+                unit.ad_experiment_id,
+                unit.segment_id,
+                unit.audience_snapshot_id,
+                unit.vector_generation_id
+        )
+        SELECT 1
+        FROM manifest_results AS manifest
+        LEFT JOIN manifest_bindings AS binding
+          ON binding.ad_experiment_id = manifest.ad_experiment_id
+         AND binding.segment_id = manifest.segment_id
+         AND binding.audience_snapshot_id = manifest.audience_snapshot_id
+        LEFT JOIN actual_results AS actual
+          ON actual.ad_experiment_id = manifest.ad_experiment_id
+         AND actual.segment_id = manifest.segment_id
+         AND actual.audience_snapshot_id = manifest.audience_snapshot_id
+         AND actual.vector_generation_id = binding.vector_generation_id
+        WHERE manifest.ad_experiment_id IS NULL
+           OR manifest.segment_id IS NULL
+           OR manifest.audience_snapshot_id IS NULL
+           OR manifest.unit_count IS NULL
+           OR manifest.treatment_count IS NULL
+           OR manifest.control_count IS NULL
+           OR manifest.actual_treatment_ratio IS NULL
+           OR manifest.unit_count < 0
+           OR manifest.treatment_count < 0
+           OR manifest.control_count < 0
+           OR manifest.treatment_count + manifest.control_count <>
+                manifest.unit_count
+           OR binding.ad_experiment_id IS NULL
+           OR binding.member_count IS DISTINCT FROM manifest.unit_count
+           OR manifest.unit_count <> COALESCE(actual.unit_count, 0)
+           OR manifest.treatment_count <>
+                COALESCE(actual.treatment_count, 0)
+           OR manifest.control_count <> COALESCE(actual.control_count, 0)
+           OR round(manifest.actual_treatment_ratio, 9) <>
+                CASE
+                    WHEN manifest.unit_count = 0 THEN 0::NUMERIC
+                    ELSE round(
+                        manifest.treatment_count::NUMERIC /
+                        manifest.unit_count::NUMERIC,
+                        9
+                    )
+                END
+        UNION ALL
+        SELECT 1
+        FROM actual_results AS actual
+        LEFT JOIN manifest_results AS manifest
+          ON manifest.ad_experiment_id = actual.ad_experiment_id
+         AND manifest.segment_id = actual.segment_id
+         AND manifest.audience_snapshot_id = actual.audience_snapshot_id
+        WHERE manifest.ad_experiment_id IS NULL
+        UNION ALL
+        SELECT 1
+        FROM ad_experiment_units AS unit
+        JOIN manifest_results AS manifest
+          ON manifest.ad_experiment_id = unit.ad_experiment_id
+         AND manifest.segment_id = unit.segment_id
+         AND manifest.audience_snapshot_id = unit.audience_snapshot_id
+        WHERE unit.segment_assignment_execution_id =
+                p_segment_assignment_execution_id
+          AND unit.treatment_probability <>
+                round(manifest.actual_treatment_ratio, 9)
+        LIMIT 1
+    ) THEN
+        RAISE EXCEPTION 'manifest quota differs from experiment units: %',
+            p_segment_assignment_execution_id
+            USING ERRCODE = '23514';
+    END IF;
+END
+$$;
+
+DROP FUNCTION IF EXISTS assert_uplift_ready_assignment_population(VARCHAR);
+
+CREATE OR REPLACE FUNCTION finalize_uplift_assignment_execution(
+    p_segment_assignment_execution_id VARCHAR(100)
+)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    current_status TEXT;
+BEGIN
+    SELECT uplift_assignment_status
+    INTO current_status
+    FROM segment_assignment_executions
+    WHERE segment_assignment_execution_id =
+        p_segment_assignment_execution_id
+      AND input_manifest_json->>'schema_version' =
+        'segment-assignment-execution.v2'
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'uplift-ready assignment execution does not exist: %',
+            p_segment_assignment_execution_id
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF current_status = 'finalized' THEN
+        RETURN;
+    END IF;
+    IF current_status IS DISTINCT FROM 'preparing' THEN
+        RAISE EXCEPTION 'uplift-ready assignment execution is not preparing: %',
+            p_segment_assignment_execution_id
+            USING ERRCODE = '23514';
+    END IF;
+
+    PERFORM assert_uplift_assignment_execution(
+        p_segment_assignment_execution_id
+    );
+
+    UPDATE segment_assignment_executions
+    SET uplift_assignment_status = 'finalized',
+        uplift_finalized_at = clock_timestamp()
+    WHERE segment_assignment_execution_id =
+        p_segment_assignment_execution_id;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION prevent_ad_experiment_unit_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF EXISTS (
+            SELECT 1
+            FROM segment_assignment_executions
+            WHERE segment_assignment_execution_id =
+                    NEW.segment_assignment_execution_id
+              AND input_manifest_json->>'schema_version' =
+                    'segment-assignment-execution.v2'
+              AND uplift_assignment_status = 'finalized'
+        ) THEN
+            RAISE EXCEPTION 'finalized ad experiment units are immutable'
+                USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    RAISE EXCEPTION 'ad experiment units are immutable'
+        USING ERRCODE = '23514';
+END
+$$;
+
+CREATE TRIGGER trg_ad_experiment_unit_immutable
+BEFORE INSERT OR UPDATE OR DELETE ON ad_experiment_units
+FOR EACH ROW EXECUTE FUNCTION prevent_ad_experiment_unit_mutation();
+
+CREATE OR REPLACE FUNCTION prevent_finalized_uplift_execution_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF OLD.input_manifest_json->>'schema_version' =
+            'segment-assignment-execution.v2'
+       AND OLD.uplift_assignment_status = 'finalized'
+    THEN
+        RAISE EXCEPTION 'finalized uplift assignment execution is immutable'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE TRIGGER trg_finalized_uplift_execution_immutable
+BEFORE UPDATE OR DELETE ON segment_assignment_executions
+FOR EACH ROW
+EXECUTE FUNCTION prevent_finalized_uplift_execution_mutation();
+
+CREATE OR REPLACE FUNCTION prevent_finalized_uplift_serving_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    old_execution_id VARCHAR(100);
+    new_execution_id VARCHAR(100);
+BEGIN
+    IF TG_OP IN ('UPDATE', 'DELETE') THEN
+        old_execution_id := OLD.segment_assignment_execution_id;
+    END IF;
+    IF TG_OP IN ('INSERT', 'UPDATE') THEN
+        new_execution_id := NEW.segment_assignment_execution_id;
+    END IF;
+
+    IF (old_execution_id IS NOT NULL OR new_execution_id IS NOT NULL)
+       AND EXISTS (
+            SELECT 1
+            FROM segment_assignment_executions
+            WHERE segment_assignment_execution_id IN (
+                    old_execution_id,
+                    new_execution_id
+                  )
+              AND input_manifest_json->>'schema_version' =
+                  'segment-assignment-execution.v2'
+              AND uplift_assignment_status = 'finalized'
+       )
+    THEN
+        RAISE EXCEPTION 'finalized uplift serving assignments are immutable'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE TRIGGER trg_finalized_uplift_serving_immutable
+BEFORE INSERT OR UPDATE OR DELETE ON user_segment_assignments
+FOR EACH ROW
+EXECUTE FUNCTION prevent_finalized_uplift_serving_mutation();
 
 -- =========================================================
 -- 19. Ad Dispatch Jobs
