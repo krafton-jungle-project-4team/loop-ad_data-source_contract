@@ -200,6 +200,12 @@ for _ in 1 2; do
         "${ROOT_DIR}/postgres/expand_uplift_ready_assignment_v1.sql"
 done
 
+for _ in 1 2; do
+    psql_file \
+        "${FRESH_DB}" \
+        "${ROOT_DIR}/postgres/expand_uplift_model_registry_v1.sql"
+done
+
 assert_query "${FRESH_DB}" "
 SELECT (
     project_id IS NULL
@@ -258,6 +264,9 @@ psql_file \
 psql_file \
     "${FRESH_DB}" \
     "${ROOT_DIR}/postgres/tests/verify_uplift_ready_assignment_v1.sql"
+psql_file \
+    "${FRESH_DB}" \
+    "${ROOT_DIR}/postgres/tests/verify_uplift_model_registry_v1.sql"
 psql_file \
     "${FRESH_DB}" \
     "${ROOT_DIR}/postgres/tests/benchmark_uplift_assignment_finalization.sql"
@@ -417,6 +426,12 @@ for _ in 1 2; do
         "${ROOT_DIR}/postgres/expand_uplift_ready_assignment_v1.sql"
 done
 
+for _ in 1 2; do
+    psql_file \
+        "${AUDIENCE_LEGACY_DB}" \
+        "${ROOT_DIR}/postgres/expand_uplift_model_registry_v1.sql"
+done
+
 normalized_schema_dump() {
     local database="$1"
 
@@ -456,9 +471,18 @@ for _ in 1 2; do
         "${ROOT_DIR}/postgres/expand_uplift_ready_assignment_v1.sql"
 done
 
+for _ in 1 2; do
+    psql_file \
+        "${UPLIFT_LEGACY_DB}" \
+        "${ROOT_DIR}/postgres/expand_uplift_model_registry_v1.sql"
+done
+
 psql_file \
     "${UPLIFT_LEGACY_DB}" \
     "${ROOT_DIR}/postgres/tests/verify_uplift_ready_assignment_v1.sql"
+psql_file \
+    "${UPLIFT_LEGACY_DB}" \
+    "${ROOT_DIR}/postgres/tests/verify_uplift_model_registry_v1.sql"
 
 uplift_migrated_schema="$(normalized_schema_dump "${UPLIFT_LEGACY_DB}")"
 if [[ "${fresh_audience_schema}" != "${uplift_migrated_schema}" ]]; then
