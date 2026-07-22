@@ -2891,7 +2891,11 @@ BEGIN
               OR target.promotion_id <> run_row.promotion_id
               OR target.allocation_plan_id <> binding.allocation_plan_id
               OR target.audience_snapshot_id <> binding.final_snapshot_id
-              OR target.audience_reservation_state <> 'consumed'
+              OR target.audience_reservation_state <>
+                  CASE
+                      WHEN target.status = 'stopped' THEN 'released'
+                      ELSE 'consumed'
+                  END
               OR plan.status <> 'locked'
               OR plan.target_analysis_id <> run_row.analysis_id
               OR plan.promotion_id <> run_row.promotion_id
@@ -2909,6 +2913,9 @@ BEGIN
     IF EXISTS (
         SELECT 1
         FROM promotion_run_target_bindings AS binding
+        JOIN promotion_target_segments AS target
+          ON target.analysis_id = binding.target_analysis_id
+         AND target.segment_id = binding.segment_id
         JOIN segment_audience_snapshots AS snapshot
           ON snapshot.snapshot_id = binding.final_snapshot_id
         WHERE binding.promotion_run_id = p_promotion_run_id
@@ -2919,10 +2926,14 @@ BEGIN
                 AND excluded.segment_id = binding.segment_id
                 AND excluded.allocation_plan_id = binding.allocation_plan_id
                 AND excluded.final_snapshot_id = binding.final_snapshot_id
-                AND excluded.state = 'consumed'
+                AND excluded.state =
+                    CASE
+                        WHEN target.status = 'stopped' THEN 'released'
+                        ELSE 'consumed'
+                    END
           ) <> snapshot.final_user_count
     ) THEN
-        RAISE EXCEPTION 'run binding consumed member count mismatch'
+        RAISE EXCEPTION 'run binding member count mismatch'
             USING ERRCODE = '23514';
     END IF;
 END
