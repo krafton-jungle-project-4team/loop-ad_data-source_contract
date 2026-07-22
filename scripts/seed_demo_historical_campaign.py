@@ -38,6 +38,52 @@ MIN_SAMPLE_SIZE = 100
 ELIGIBLE_USER_COUNT = 613
 KST = ZoneInfo("Asia/Seoul")
 
+RETIRED_YEOSU_PROMOTION_ID = "promo_demo_yeosu_oceanview_earlybird"
+RETIRED_YEOSU_ANALYSIS_IDS = (
+    "analysis_demo_yeosu_oceanview_earlybird",
+    "analysis_demo_yeosu_oceanview_earlybird_loop_2",
+    "analysis_demo_yeosu_oceanview_earlybird_loop_3",
+)
+RETIRED_YEOSU_GENERATION_IDS = (
+    "generation_demo_yeosu_oceanview_earlybird",
+    "generation_demo_yeosu_oceanview_earlybird_loop_2",
+    "generation_demo_yeosu_oceanview_earlybird_loop_3",
+)
+RETIRED_YEOSU_RUN_IDS = (
+    "prun_demo_yeosu_oceanview_earlybird_loop_1",
+    "prun_demo_yeosu_oceanview_earlybird_loop_2",
+    "prun_demo_yeosu_oceanview_earlybird_loop_3",
+)
+RETIRED_YEOSU_EXPERIMENT_IDS = (
+    "adexp_demo_yeosu_oceanview_earlybird",
+    "adexp_demo_yeosu_oceanview_earlybird_loop_2",
+    "adexp_demo_yeosu_oceanview_earlybird_loop_3",
+)
+RETIRED_YEOSU_EVALUATION_IDS = (
+    "eval_demo_yeosu_oceanview_earlybird",
+    "eval_demo_yeosu_oceanview_earlybird_loop_2",
+    "eval_demo_yeosu_oceanview_earlybird_loop_3",
+)
+RETIRED_YEOSU_CONTENT_IDS = (
+    "content_demo_yeosu_oceanview_email",
+    "content_demo_yeosu_oceanview_email_loop_2",
+    "content_demo_yeosu_oceanview_email_loop_3",
+)
+RETIRED_YEOSU_SEGMENT_IDS = ("seg_demo_yeosu_booking_intent",)
+
+
+@dataclass(frozen=True)
+class AudienceIntentFixture:
+    repeat_view_user_count: int
+    repeat_view_booking_count: int
+    comparison_user_count: int
+    comparison_booking_count: int
+    booking_abandon_user_count: int
+    booking_complete_user_count: int
+    booking_abandon_median_revenue: Decimal
+    booking_complete_median_revenue: Decimal
+    age_groups: tuple[str, ...]
+
 
 @dataclass(frozen=True)
 class Scenario:
@@ -72,6 +118,9 @@ class Scenario:
     schedule_start_days_ago: int
     schedule_end_days_ago: int
     change_summary: str | None = None
+    target_value: Decimal = TARGET_VALUE
+    outcome_destination_ids: tuple[str, ...] = ()
+    audience_intent_fixture: AudienceIntentFixture | None = None
 
 
 BASE_SCENARIOS = (
@@ -182,61 +231,67 @@ BASE_SCENARIOS = (
         schedule_end_days_ago=80,
     ),
     Scenario(
-        key="yeosu_oceanview",
-        promotion_id="promo_demo_yeosu_oceanview_earlybird",
-        analysis_id="analysis_demo_yeosu_oceanview_earlybird",
-        generation_id="generation_demo_yeosu_oceanview_earlybird",
-        promotion_run_id="prun_demo_yeosu_oceanview_earlybird_loop_1",
-        segment_id="seg_demo_yeosu_booking_intent",
-        content_id="content_demo_yeosu_oceanview_email",
-        content_option_id="option_demo_yeosu_oceanview_email_1",
-        ad_experiment_id="adexp_demo_yeosu_oceanview_earlybird",
-        evaluation_id="eval_demo_yeosu_oceanview_earlybird",
-        promotion_name="여수 오션뷰 주말 얼리버드",
-        segment_name="여수 오션뷰 예약 관심 고객",
+        key="jeju_okinawa_intent",
+        promotion_id="promo_demo_jeju_okinawa_summer_intent",
+        analysis_id="analysis_demo_jeju_okinawa_summer_intent",
+        generation_id="generation_demo_jeju_okinawa_summer_intent",
+        promotion_run_id="prun_demo_jeju_okinawa_summer_intent_loop_1",
+        segment_id="seg_demo_jeju_okinawa_interest",
+        content_id="content_demo_jeju_okinawa_summer_email",
+        content_option_id="option_demo_jeju_okinawa_summer_email_1",
+        ad_experiment_id="adexp_demo_jeju_okinawa_summer_intent",
+        evaluation_id="eval_demo_jeju_okinawa_summer_intent",
+        promotion_name="제주·오키나와 여름 예약 의도 검증",
+        segment_name="제주·오키나와 숙소 관심 고객",
         natural_language_query=(
-            "여수 오션뷰 숙소를 상세 조회하고 예약 단계까지 진입한 고객"
+            "최근 제주 또는 오키나와 숙소를 확인한 여름 여행 관심 고객"
         ),
         rule_json={
             "type": "all",
             "conditions": [
-                {"event": "hotel_detail_view", "property": "destination", "value": "yeosu"},
-                {"property": "view_type", "operator": "eq", "value": "ocean"},
-                {"event": "booking_start", "operator": "exists"},
+                {
+                    "event": "hotel_detail_view",
+                    "property": "destination_id",
+                    "operator": "in",
+                    "value": ["jeju", "okinawa"],
+                },
+                {"property": "checkin_month", "operator": "in", "value": [6, 7, 8]},
             ],
         },
         message_brief=(
-            "여수 오션뷰 객실의 예약 단계까지 진입한 고객에게 주말 얼리버드 "
-            "12% 할인과 무료 취소 가능 객실을 안내합니다."
+            "제주·오키나와 숙소를 살펴본 고객에게 여름 성수기 숙소와 "
+            "예약 혜택을 안내합니다."
         ),
-        offer_type="oceanview_earlybird_discount",
+        offer_type="summer_destination_offer",
         landing_url=(
-            "https://demo-shoppingmall.dev.loop-ad.org/search?destination=yeosu"
-            "&deal=oceanview-earlybird"
+            "https://demo-shoppingmall.dev.loop-ad.org/search?destination=jeju,okinawa"
+            "&deal=summer-intent"
         ),
-        subject="찜한 여수 오션뷰, 얼리버드 12% 할인",
-        preheader="무료 취소 가능 객실로 주말 여행을 먼저 준비하세요.",
-        title="여수 바다 앞 주말을 미리 예약하세요",
+        subject="제주·오키나와 여름 숙소, 지금 비교해 보세요",
+        preheader="관심 있게 본 숙소와 여름 예약 조건을 한 번에 확인하세요.",
+        title="제주·오키나와 여름여행을 이어서 준비하세요",
         body=(
-            "최근 확인한 여수 오션뷰 객실을 얼리버드 12% 할인으로 예약하고 "
-            "무료 취소 가능 여부도 함께 비교해 보세요."
+            "최근 확인한 제주·오키나와 숙소의 여름 일정과 예약 조건을 "
+            "비교하고 여행 준비를 이어가 보세요."
         ),
-        cta="예약 이어서 하기",
-        destination="yeosu",
-        hotel_id="yeosu-ocean-terrace-014",
-        stage_counts=(173, 151, 126, 79, 12),
+        cta="여름 숙소 다시 보기",
+        destination="jeju",
+        hotel_id="jeju-summer-resort-021",
+        stage_counts=(220, 172, 130, 58, 7),
         loop_count=1,
         expected_status="goal_not_met",
         improvement_directions=(
-            "예약 시작 이후 결제 실패·가격 변경·객실 소진 이벤트를 추가 수집해 직접 원인을 확인",
-            "예약 화면에서 최종 결제 금액과 무료 취소 조건이 일관되게 표시되는지 점검",
+            "현재 예약 의도를 구분할 수 있도록 숙소 반복 조회 행동을 비교",
+            "예약 시작 후 완료하지 않은 고객의 숙박 금액과 행동 차이를 확인",
         ),
         schedule_start_days_ago=52,
         schedule_end_days_ago=43,
+        target_value=Decimal("0.100000"),
+        outcome_destination_ids=("jeju", "okinawa"),
     ),
 )
 
-BUSAN_WEEKDAY, GANGNEUNG_FAMILY_1, YEOSU_OCEANVIEW_1 = BASE_SCENARIOS
+BUSAN_WEEKDAY, GANGNEUNG_FAMILY_1, JEJU_OKINAWA_1 = BASE_SCENARIOS
 
 GANGNEUNG_FAMILY_2 = replace(
     GANGNEUNG_FAMILY_1,
@@ -275,73 +330,48 @@ GANGNEUNG_FAMILY_2 = replace(
     ),
 )
 
-YEOSU_OCEANVIEW_2 = replace(
-    YEOSU_OCEANVIEW_1,
-    key="yeosu_oceanview_loop_2",
-    analysis_id="analysis_demo_yeosu_oceanview_earlybird_loop_2",
-    generation_id="generation_demo_yeosu_oceanview_earlybird_loop_2",
-    promotion_run_id="prun_demo_yeosu_oceanview_earlybird_loop_2",
-    content_id="content_demo_yeosu_oceanview_email_loop_2",
-    content_option_id="option_demo_yeosu_oceanview_email_loop_2",
-    ad_experiment_id="adexp_demo_yeosu_oceanview_earlybird_loop_2",
-    evaluation_id="eval_demo_yeosu_oceanview_earlybird_loop_2",
+JEJU_OKINAWA_2 = replace(
+    JEJU_OKINAWA_1,
+    key="jeju_okinawa_intent_loop_2",
+    analysis_id="analysis_demo_jeju_okinawa_summer_intent_loop_2",
+    generation_id="generation_demo_jeju_okinawa_summer_intent_loop_2",
+    promotion_run_id="prun_demo_jeju_okinawa_summer_intent_loop_2",
+    content_id="content_demo_jeju_okinawa_summer_email_loop_2",
+    content_option_id="option_demo_jeju_okinawa_summer_email_loop_2",
+    ad_experiment_id="adexp_demo_jeju_okinawa_summer_intent_loop_2",
+    evaluation_id="eval_demo_jeju_okinawa_summer_intent_loop_2",
     message_brief=(
-        "1차 실험의 예약 완료 이탈을 반영해 최종 결제 금액과 무료 취소 "
-        "기한을 예약 화면에 고정 표시합니다."
+        "1차 실험 결과를 바탕으로 제주·오키나와 숙소 관심 고객 안에서 "
+        "현재 예약 의도 차이를 검증합니다."
     ),
-    subject="여수 오션뷰 12% 할인, 결제 금액까지 미리 확인",
-    preheader="무료 취소 기한과 최종 금액을 예약 전에 확인하세요.",
-    title="가격과 취소 조건이 분명한 여수 얼리버드",
+    subject="다시 본 제주·오키나와 숙소, 예약 조건을 확인하세요",
+    preheader="반복해서 확인한 숙소의 일정과 최종 금액을 비교해 보세요.",
+    title="관심 숙소의 여름 예약을 이어가세요",
     body=(
-        "여수 오션뷰 얼리버드 12% 할인 객실의 최종 결제 금액과 무료 취소 "
-        "기한을 예약 전에 한 번에 확인하세요."
+        "최근 반복해서 살펴본 제주·오키나와 숙소의 여름 일정과 최종 금액을 "
+        "확인하고 예약을 이어가 보세요."
     ),
-    cta="조건 확인하고 예약하기",
-    stage_counts=(168, 148, 124, 83, 18),
+    cta="관심 숙소 예약 이어가기",
+    stage_counts=(216, 180, 144, 64, 11),
     loop_count=2,
     expected_status="goal_not_met",
     improvement_directions=(
-        "객실 소진과 가격 변경 여부를 예약 시작 전에 확인할 수 있도록 안내 강화",
-        "결제 단계 입력 항목과 오류 발생 지점을 추가로 점검",
+        "20~30대이면서 제주·오키나와 숙소를 반복 조회한 고객군을 별도로 검증",
+        "예약 시작 후 완료하지 않은 고객의 숙박 총액과 취소 조건을 추가 확인",
     ),
     schedule_start_days_ago=37,
     schedule_end_days_ago=28,
-    change_summary="최종 결제 금액과 무료 취소 기한을 예약 화면에 고정 표시",
-)
-
-YEOSU_OCEANVIEW_3 = replace(
-    YEOSU_OCEANVIEW_1,
-    key="yeosu_oceanview_loop_3",
-    analysis_id="analysis_demo_yeosu_oceanview_earlybird_loop_3",
-    generation_id="generation_demo_yeosu_oceanview_earlybird_loop_3",
-    promotion_run_id="prun_demo_yeosu_oceanview_earlybird_loop_3",
-    content_id="content_demo_yeosu_oceanview_email_loop_3",
-    content_option_id="option_demo_yeosu_oceanview_email_loop_3",
-    ad_experiment_id="adexp_demo_yeosu_oceanview_earlybird_loop_3",
-    evaluation_id="eval_demo_yeosu_oceanview_earlybird_loop_3",
-    message_brief=(
-        "2차 실험의 결제 이탈을 반영해 객실 소진·가격 변경 안내를 예약 전에 "
-        "제공하고 결제 입력 단계를 줄입니다."
-    ),
-    subject="여수 오션뷰 객실 확보, 간편 예약으로 마무리하세요",
-    preheader="가격 변경 여부를 확인하고 줄어든 단계로 예약하세요.",
-    title="여수 오션뷰 얼리버드, 간편 예약으로 완료",
-    body=(
-        "현재 예약 가능한 여수 오션뷰 객실과 확정 금액을 먼저 확인하고 "
-        "간소화된 결제 단계로 예약을 마무리하세요."
-    ),
-    cta="간편 예약 완료하기",
-    stage_counts=(165, 147, 127, 91, 25),
-    loop_count=3,
-    expected_status="goal_met",
-    improvement_directions=(
-        "예약 전 객실·가격 확인과 간소화된 결제 흐름을 후속 캠페인에도 유지",
-        "예약 완료 고객의 오션뷰 선호를 다음 숙박 추천에 활용",
-    ),
-    schedule_start_days_ago=22,
-    schedule_end_days_ago=12,
-    change_summary=(
-        "객실 소진·가격 변경 여부를 예약 전에 안내하고 결제 입력 단계를 축소"
+    change_summary="숙소 반복 조회 행동과 예약 시작 이후 이탈을 분리해 관측",
+    audience_intent_fixture=AudienceIntentFixture(
+        repeat_view_user_count=65,
+        repeat_view_booking_count=8,
+        comparison_user_count=151,
+        comparison_booking_count=3,
+        booking_abandon_user_count=53,
+        booking_complete_user_count=11,
+        booking_abandon_median_revenue=Decimal("780000"),
+        booking_complete_median_revenue=Decimal("520000"),
+        age_groups=("20대", "30대"),
     ),
 )
 
@@ -349,9 +379,8 @@ SCENARIOS = (
     BUSAN_WEEKDAY,
     GANGNEUNG_FAMILY_1,
     GANGNEUNG_FAMILY_2,
-    YEOSU_OCEANVIEW_1,
-    YEOSU_OCEANVIEW_2,
-    YEOSU_OCEANVIEW_3,
+    JEJU_OKINAWA_1,
+    JEJU_OKINAWA_2,
 )
 
 
@@ -457,6 +486,179 @@ def _canonical_json(value: Any) -> str:
 
 def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _goal_snapshot(scenario: Scenario) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {
+        "goal_metric": "booking_conversion_rate",
+        "goal_target_value": str(scenario.target_value),
+        "goal_basis": "all_segments",
+        "min_sample_size": MIN_SAMPLE_SIZE,
+    }
+    if not scenario.outcome_destination_ids:
+        return snapshot
+
+    outcome_spec = {
+        "outcome_metric": "booking_conversion_rate",
+        "outcome_event_name": "booking_complete",
+        "outcome_filter": {
+            "destination_ids": sorted(set(scenario.outcome_destination_ids)),
+        },
+        "outcome_definition_version": "booking-outcome.v1",
+        "uplift_training_eligible": True,
+    }
+    snapshot.update(
+        {
+            "outcome_spec": outcome_spec,
+            "outcome_spec_hash": _sha256(_canonical_json(outcome_spec)),
+            "audience_context": {
+                "age_groups": list(
+                    scenario.audience_intent_fixture.age_groups
+                    if scenario.audience_intent_fixture is not None
+                    else ("20대", "30대")
+                )
+            },
+        }
+    )
+    return snapshot
+
+
+def _delete_retired_yeosu_fixture(
+    connection: psycopg.Connection[Any],
+) -> None:
+    promotion_ids = [RETIRED_YEOSU_PROMOTION_ID]
+    run_ids = list(RETIRED_YEOSU_RUN_IDS)
+    experiment_ids = list(RETIRED_YEOSU_EXPERIMENT_IDS)
+    evaluation_ids = list(RETIRED_YEOSU_EVALUATION_IDS)
+    analysis_ids = list(RETIRED_YEOSU_ANALYSIS_IDS)
+    generation_ids = list(RETIRED_YEOSU_GENERATION_IDS)
+    content_ids = list(RETIRED_YEOSU_CONTENT_IDS)
+    segment_ids = list(RETIRED_YEOSU_SEGMENT_IDS)
+
+    with connection.cursor(row_factory=dict_row) as cursor:
+        cursor.execute(
+            """
+            SELECT
+                (SELECT count(*) FROM segment_audience_snapshots
+                 WHERE promotion_id = ANY(%s)) AS snapshot_count,
+                (SELECT count(*) FROM segment_audience_allocation_plans
+                 WHERE promotion_id = ANY(%s)) AS allocation_plan_count,
+                (SELECT count(*) FROM ad_experiment_units
+                 WHERE promotion_run_id = ANY(%s)) AS experiment_unit_count
+            """,
+            (promotion_ids, promotion_ids, run_ids),
+        )
+        blockers = cursor.fetchone()
+        if blockers is not None and any(int(value) > 0 for value in blockers.values()):
+            raise RuntimeError(
+                "retired Yeosu fixture has immutable V2 audience or uplift records: "
+                f"{dict(blockers)}"
+            )
+
+        cursor.execute(
+            "DELETE FROM redirect_links WHERE promotion_run_id = ANY(%s)",
+            (run_ids,),
+        )
+        cursor.execute(
+            "DELETE FROM ad_dispatch_jobs WHERE promotion_run_id = ANY(%s)",
+            (run_ids,),
+        )
+        cursor.execute(
+            "DELETE FROM promotion_automation_jobs WHERE promotion_run_id = ANY(%s)",
+            (run_ids,),
+        )
+        cursor.execute(
+            "DELETE FROM user_segment_assignments WHERE promotion_run_id = ANY(%s)",
+            (run_ids,),
+        )
+        cursor.execute(
+            "DELETE FROM segment_assignment_executions WHERE promotion_run_id = ANY(%s)",
+            (run_ids,),
+        )
+        cursor.execute(
+            """
+            DELETE FROM next_loop_preparations
+            WHERE source_promotion_run_id = ANY(%s)
+               OR activated_promotion_run_id = ANY(%s)
+            """,
+            (run_ids, run_ids),
+        )
+        cursor.execute(
+            """
+            UPDATE ad_experiments
+            SET parent_ad_experiment_id = NULL,
+                source_evaluation_id = NULL
+            WHERE ad_experiment_id = ANY(%s)
+            """,
+            (experiment_ids,),
+        )
+        cursor.execute(
+            "DELETE FROM promotion_evaluations WHERE evaluation_id = ANY(%s)",
+            (evaluation_ids,),
+        )
+        cursor.execute(
+            "DELETE FROM ad_experiments WHERE ad_experiment_id = ANY(%s)",
+            (experiment_ids,),
+        )
+        cursor.execute(
+            "DELETE FROM promotion_run_target_bindings WHERE promotion_run_id = ANY(%s)",
+            (run_ids,),
+        )
+        cursor.execute(
+            "DELETE FROM promotion_runs WHERE promotion_run_id = ANY(%s)",
+            (run_ids,),
+        )
+        cursor.execute(
+            "DELETE FROM promotion_audience_exclusion_members WHERE promotion_id = ANY(%s)",
+            (promotion_ids,),
+        )
+        cursor.execute(
+            "DELETE FROM promotion_target_segments WHERE promotion_id = ANY(%s)",
+            (promotion_ids,),
+        )
+        cursor.execute(
+            "DELETE FROM promotion_segment_suggestions WHERE promotion_id = ANY(%s)",
+            (promotion_ids,),
+        )
+        cursor.execute(
+            "DELETE FROM promotion_audience_exclusion_state WHERE promotion_id = ANY(%s)",
+            (promotion_ids,),
+        )
+        cursor.execute(
+            "DELETE FROM content_candidates WHERE content_id = ANY(%s)",
+            (content_ids,),
+        )
+        cursor.execute(
+            "DELETE FROM generation_runs WHERE generation_id = ANY(%s)",
+            (generation_ids,),
+        )
+        cursor.execute(
+            "DELETE FROM promotion_analyses WHERE analysis_id = ANY(%s)",
+            (analysis_ids,),
+        )
+        cursor.execute(
+            "DELETE FROM segment_definitions WHERE segment_id = ANY(%s)",
+            (segment_ids,),
+        )
+        cursor.execute(
+            """
+            DELETE FROM funnel_steps
+            WHERE funnel_id IN (
+                SELECT funnel_id
+                FROM funnel_definitions
+                WHERE promotion_id = ANY(%s)
+            )
+            """,
+            (promotion_ids,),
+        )
+        cursor.execute(
+            "DELETE FROM funnel_definitions WHERE promotion_id = ANY(%s)",
+            (promotion_ids,),
+        )
+        cursor.execute(
+            "DELETE FROM promotions WHERE promotion_id = ANY(%s)",
+            (promotion_ids,),
+        )
 
 
 def _scenario_times(scenario: Scenario, today: date) -> tuple[datetime, datetime]:
@@ -571,7 +773,7 @@ def _upsert_hierarchy(
                 PROJECT_ID,
                 CAMPAIGN_NAME,
                 (
-                    "부산·강릉·여수 숙박에 관심을 보인 기존 고객에게 지역별 "
+                    "부산·강릉·제주·오키나와 숙박에 관심을 보인 기존 고객에게 지역별 "
                     "혜택을 제안해 예약 전환율을 높입니다."
                 ),
                 campaign_start,
@@ -607,6 +809,9 @@ def _upsert_hierarchy(
                 "historical_campaign": True,
                 "persona": "이미영",
                 "destination": scenario.destination,
+                "destination_ids": list(
+                    scenario.outcome_destination_ids or (scenario.destination,)
+                ),
                 "repeat_experiment_count": promotion_max_loop_count,
             }
 
@@ -656,7 +861,7 @@ def _upsert_hierarchy(
                     PROJECT_ID,
                     CAMPAIGN_ID,
                     scenario.promotion_name,
-                    TARGET_VALUE,
+                    scenario.target_value,
                     MIN_SAMPLE_SIZE,
                     promotion_max_loop_count,
                     scenario.message_brief,
@@ -979,14 +1184,7 @@ def _upsert_hierarchy(
                     scenario.generation_id,
                     scenario.loop_count,
                     result_status,
-                    Jsonb(
-                        {
-                            "goal_metric": "booking_conversion_rate",
-                            "goal_target_value": str(TARGET_VALUE),
-                            "goal_basis": "all_segments",
-                            "min_sample_size": MIN_SAMPLE_SIZE,
-                        }
-                    ),
+                    Jsonb(_goal_snapshot(scenario)),
                     Jsonb(scope),
                     _sha256(scope_json),
                     started_at,
@@ -1044,7 +1242,7 @@ def _upsert_hierarchy(
                     scenario.content_option_id,
                     scenario.loop_count,
                     result_status,
-                    TARGET_VALUE,
+                    scenario.target_value,
                     started_at,
                     ended_at,
                     started_at,
@@ -1131,6 +1329,58 @@ def _load_experiments(
     return experiments
 
 
+def _scenario_destinations(scenario: Scenario) -> tuple[str, ...]:
+    return scenario.outcome_destination_ids or (scenario.destination,)
+
+
+def _scenario_destination(scenario: Scenario, user_no: int) -> str:
+    destinations = _scenario_destinations(scenario)
+    return destinations[user_no % len(destinations)]
+
+
+def _stage_user_numbers(scenario: Scenario) -> tuple[set[int], ...]:
+    if scenario.key != JEJU_OKINAWA_2.key:
+        return tuple(set(range(count)) for count in scenario.stage_counts)
+
+    complete_users = set(range(8)) | {65, 66, 67}
+    booking_start_users = set(range(61)) | {65, 66, 67}
+    memberships = (
+        set(range(216)),
+        set(range(180)),
+        set(range(144)),
+        booking_start_users,
+        complete_users,
+    )
+    if tuple(len(users) for users in memberships) != scenario.stage_counts:
+        raise RuntimeError("Jeju/Okinawa funnel fixture membership is invalid")
+    return memberships
+
+
+def _raw_event_row(
+    *,
+    write_key: str,
+    event_id: str,
+    event_name: str,
+    event_time: datetime,
+    user_id: str,
+    session_id: str,
+    properties: dict[str, Any],
+) -> list[Any]:
+    return [
+        PROJECT_ID,
+        write_key,
+        "hotel_rec_promo.v1",
+        event_id,
+        event_name,
+        event_time,
+        "fixture",
+        user_id,
+        session_id,
+        json.dumps(properties, ensure_ascii=False, separators=(",", ":")),
+        "valid",
+    ]
+
+
 def _fixture_rows(
     scenario: Scenario,
     experiment: dict[str, Any],
@@ -1138,50 +1388,192 @@ def _fixture_rows(
 ) -> list[list[Any]]:
     rows: list[list[Any]] = []
     base_time = experiment["ended_at"] - timedelta(days=1)
-    for user_no in range(scenario.stage_counts[0]):
+    stage_memberships = _stage_user_numbers(scenario)
+    complete_users = stage_memberships[4]
+    for user_no in sorted(stage_memberships[0]):
         user_id = f"demo_history_{scenario.key}_user_{user_no:03d}"
-        for stage_no, ((event_name, _), stage_count) in enumerate(
-            zip(STAGES, scenario.stage_counts)
-        ):
-            if user_no >= stage_count:
+        destination_id = _scenario_destination(scenario, user_no)
+        shared_properties = {
+            "campaign_id": CAMPAIGN_ID,
+            "promotion_id": scenario.promotion_id,
+            "promotion_run_id": scenario.promotion_run_id,
+            "ad_experiment_id": scenario.ad_experiment_id,
+            "segment_id": scenario.segment_id,
+            "promotion_channel": "email",
+            "content_id": scenario.content_id,
+            "content_option_id": scenario.content_option_id,
+            "booking_id": f"booking_demo_history_{scenario.key}_{user_no:03d}",
+            "hotel_id": scenario.hotel_id,
+            "destination": destination_id,
+            "destination_id": destination_id,
+            "destination_name": destination_id,
+            "checkin_date": "2026-07-18",
+            "fixture_id": FIXTURE_ID,
+        }
+        rows.append(
+            _raw_event_row(
+                write_key=write_key,
+                event_id=(
+                    f"{FIXTURE_EVENT_PREFIX}{scenario.key}_{user_no:03d}_"
+                    "campaign_redirect_click"
+                ),
+                event_name="campaign_redirect_click",
+                event_time=base_time - timedelta(minutes=1),
+                user_id=user_id,
+                session_id=f"session_demo_history_{scenario.key}_{user_no:03d}",
+                properties=shared_properties,
+            )
+        )
+        for stage_no, (event_name, _) in enumerate(STAGES):
+            if user_no not in stage_memberships[stage_no]:
                 continue
-            properties = {
-                "campaign_id": CAMPAIGN_ID,
-                "promotion_id": scenario.promotion_id,
-                "promotion_run_id": scenario.promotion_run_id,
-                "ad_experiment_id": scenario.ad_experiment_id,
-                "segment_id": scenario.segment_id,
-                "promotion_channel": "email",
-                "content_id": scenario.content_id,
-                "content_option_id": scenario.content_option_id,
-                "booking_id": f"booking_demo_history_{scenario.key}_{user_no:03d}",
-                "hotel_id": scenario.hotel_id,
-                "destination": scenario.destination,
-                "fixture_id": FIXTURE_ID,
-            }
+            properties = dict(shared_properties)
+            if event_name == "booking_start":
+                properties.update(
+                    {
+                        "revenue": (
+                            "520000" if user_no in complete_users else "780000"
+                        ),
+                        "currency": "KRW",
+                    }
+                )
             rows.append(
-                [
-                    PROJECT_ID,
-                    write_key,
-                    "hotel_rec_promo.v1",
-                    (
+                _raw_event_row(
+                    write_key=write_key,
+                    event_id=(
                         f"{FIXTURE_EVENT_PREFIX}{scenario.key}_{user_no:03d}_"
                         f"{event_name}"
                     ),
-                    event_name,
-                    base_time + timedelta(minutes=stage_no * 5),
-                    "fixture",
-                    user_id,
-                    f"session_demo_history_{scenario.key}_{user_no:03d}",
-                    json.dumps(properties, ensure_ascii=False, separators=(",", ":")),
-                    "valid",
-                ]
+                    event_name=event_name,
+                    event_time=base_time + timedelta(minutes=stage_no * 5),
+                    user_id=user_id,
+                    session_id=f"session_demo_history_{scenario.key}_{user_no:03d}",
+                    properties=properties,
+                )
+            )
+
+    intent_fixture = scenario.audience_intent_fixture
+    if intent_fixture is not None:
+        for user_no in range(intent_fixture.repeat_view_user_count):
+            user_id = f"demo_history_{scenario.key}_user_{user_no:03d}"
+            destination_id = _scenario_destination(scenario, user_no)
+            for repeat_no, days_before in enumerate((10, 5), start=1):
+                rows.append(
+                    _raw_event_row(
+                        write_key=write_key,
+                        event_id=(
+                            f"{FIXTURE_EVENT_PREFIX}{scenario.key}_{user_no:03d}_"
+                            f"pre_detail_{repeat_no}"
+                        ),
+                        event_name="hotel_detail_view",
+                        event_time=base_time - timedelta(days=days_before),
+                        user_id=user_id,
+                        session_id=(
+                            f"session_demo_history_{scenario.key}_{user_no:03d}_pre"
+                        ),
+                        properties={
+                            "hotel_id": scenario.hotel_id,
+                            "destination_id": destination_id,
+                            "destination_name": destination_id,
+                            "fixture_id": FIXTURE_ID,
+                        },
+                    )
+                )
+    return rows
+
+
+def _current_audience_rows(
+    *,
+    write_key: str,
+    now: datetime,
+) -> list[list[Any]]:
+    rows: list[list[Any]] = []
+    for user_no in range(700):
+        user_id = f"demo_current_jeju_okinawa_user_{user_no:03d}"
+        session_id = f"session_demo_current_jeju_okinawa_{user_no:03d}"
+        age_group = "20대" if user_no % 2 == 0 else "30대"
+        if user_no >= 620:
+            age_group = "40대" if user_no % 2 == 0 else "50대"
+        destination_id = "jeju" if user_no % 2 == 0 else "okinawa"
+        common = {
+            "fixture_id": FIXTURE_ID,
+            "age_group": age_group,
+        }
+        rows.append(
+            _raw_event_row(
+                write_key=write_key,
+                event_id=f"{FIXTURE_EVENT_PREFIX}current_{user_no:03d}_page_view",
+                event_name="page_view",
+                event_time=now - timedelta(days=6, minutes=user_no % 60),
+                user_id=user_id,
+                session_id=session_id,
+                properties=common,
+            )
+        )
+        if user_no >= 220:
+            continue
+        for detail_no in range(2):
+            rows.append(
+                _raw_event_row(
+                    write_key=write_key,
+                    event_id=(
+                        f"{FIXTURE_EVENT_PREFIX}current_{user_no:03d}_"
+                        f"hotel_detail_view_{detail_no + 1}"
+                    ),
+                    event_name="hotel_detail_view",
+                    event_time=now - timedelta(days=5, minutes=30 - detail_no),
+                    user_id=user_id,
+                    session_id=session_id,
+                    properties={
+                        **common,
+                        "hotel_id": f"{destination_id}-current-demo-hotel",
+                        "destination_id": destination_id,
+                        "destination_name": destination_id,
+                        "checkin_date": "2026-08-08",
+                    },
+                )
+            )
+        if user_no >= 150:
+            continue
+        booking_properties = {
+            **common,
+            "booking_id": f"booking_demo_current_{user_no:03d}",
+            "hotel_id": f"{destination_id}-current-demo-hotel",
+            "destination_id": destination_id,
+            "destination_name": destination_id,
+            "revenue": "690000",
+            "currency": "KRW",
+        }
+        rows.append(
+            _raw_event_row(
+                write_key=write_key,
+                event_id=f"{FIXTURE_EVENT_PREFIX}current_{user_no:03d}_booking_start",
+                event_name="booking_start",
+                event_time=now - timedelta(days=4),
+                user_id=user_id,
+                session_id=session_id,
+                properties=booking_properties,
+            )
+        )
+        if user_no < 18:
+            rows.append(
+                _raw_event_row(
+                    write_key=write_key,
+                    event_id=(
+                        f"{FIXTURE_EVENT_PREFIX}current_{user_no:03d}_"
+                        "booking_complete"
+                    ),
+                    event_name="booking_complete",
+                    event_time=now - timedelta(days=4) + timedelta(minutes=10),
+                    user_id=user_id,
+                    session_id=session_id,
+                    properties=booking_properties,
+                )
             )
     return rows
 
 
 def _replace_clickhouse_fixture(client: Any, rows: list[list[Any]]) -> None:
-    experiment_ids = [scenario.ad_experiment_id for scenario in SCENARIOS]
     client.command(
         """
         ALTER TABLE raw_events
@@ -1198,13 +1590,11 @@ def _replace_clickhouse_fixture(client: Any, rows: list[list[Any]]) -> None:
         DELETE WHERE project_id = {project_id:String}
           AND source = 'fixture'
           AND JSONExtractString(properties_json, 'fixture_id') = {fixture_id:String}
-          AND ad_experiment_id IN {experiment_ids:Array(String)}
         SETTINGS mutations_sync = 1
         """,
         parameters={
             "project_id": PROJECT_ID,
             "fixture_id": FIXTURE_ID,
-            "experiment_ids": experiment_ids,
         },
     )
     client.command(
@@ -1212,13 +1602,11 @@ def _replace_clickhouse_fixture(client: Any, rows: list[list[Any]]) -> None:
         ALTER TABLE booking_outcome_events
         DELETE WHERE project_id = {project_id:String}
           AND JSONExtractString(properties_json, 'fixture_id') = {fixture_id:String}
-          AND ad_experiment_id IN {experiment_ids:Array(String)}
         SETTINGS mutations_sync = 1
         """,
         parameters={
             "project_id": PROJECT_ID,
             "fixture_id": FIXTURE_ID,
-            "experiment_ids": experiment_ids,
         },
     )
     client.insert(
@@ -1334,8 +1722,248 @@ def _load_funnel_counts(
     return tuple(int(value) for value in result.result_rows[0])
 
 
+def _load_intent_fixture_counts(
+    client: Any,
+    scenario: Scenario,
+    experiment: dict[str, Any],
+    cutoff: datetime,
+) -> tuple[int, int, int, int, int, int, int, int, int]:
+    result = client.query(
+        """
+        WITH
+            response_users AS (
+                SELECT user_id, min(event_time) AS response_at
+                FROM promotion_touch_events
+                WHERE project_id = {project_id:String}
+                  AND promotion_run_id = {promotion_run_id:String}
+                  AND ad_experiment_id = {ad_experiment_id:String}
+                  AND event_name = 'campaign_landing'
+                  AND event_time <= {evaluation_cutoff_at:DateTime64(3, 'UTC')}
+                GROUP BY user_id
+            ),
+            pre_behavior AS (
+                SELECT
+                    responses.user_id,
+                    countIf(
+                        events.event_name = 'hotel_detail_view'
+                        AND events.event_time < responses.response_at
+                        AND events.event_time >= responses.response_at - toIntervalDay(30)
+                        AND lowerUTF8(JSONExtractString(
+                            events.properties_json,
+                            'destination_id'
+                        )) IN {destination_ids:Array(String)}
+                    ) AS detail_count
+                FROM response_users AS responses
+                LEFT JOIN raw_events AS events
+                  ON events.project_id = {project_id:String}
+                 AND events.user_id = responses.user_id
+                 AND events.validation_status = 'valid'
+                 AND events.event_name = 'hotel_detail_view'
+                 AND events.event_time < responses.response_at
+                 AND events.event_time >= responses.response_at - toIntervalDay(30)
+                GROUP BY responses.user_id
+            ),
+            journeys AS (
+                SELECT
+                    responses.user_id,
+                    countIf(bookings.event_name = 'booking_start') > 0 AS started,
+                    countIf(bookings.event_name = 'booking_complete') > 0 AS completed,
+                    argMaxIf(
+                        bookings.revenue,
+                        bookings.event_time,
+                        bookings.event_name = 'booking_start'
+                    ) AS booking_revenue
+                FROM response_users AS responses
+                LEFT JOIN booking_outcome_events AS bookings
+                  ON bookings.project_id = {project_id:String}
+                 AND bookings.promotion_run_id = {promotion_run_id:String}
+                 AND bookings.ad_experiment_id = {ad_experiment_id:String}
+                 AND bookings.user_id = responses.user_id
+                 AND bookings.event_time >= responses.response_at
+                 AND bookings.event_time <= {evaluation_cutoff_at:DateTime64(3, 'UTC')}
+                GROUP BY responses.user_id
+            ),
+            audience AS (
+                SELECT
+                    responses.user_id,
+                    behavior.detail_count,
+                    journeys.started,
+                    journeys.completed,
+                    journeys.booking_revenue
+                FROM response_users AS responses
+                LEFT JOIN pre_behavior AS behavior USING (user_id)
+                LEFT JOIN journeys USING (user_id)
+            )
+        SELECT
+            countIf(detail_count >= 2),
+            countIf(detail_count >= 2 AND completed),
+            countIf(detail_count < 2),
+            countIf(detail_count < 2 AND completed),
+            countIf(started AND NOT completed),
+            countIf(completed),
+            toInt64(quantileExactIf(0.5)(booking_revenue, started AND NOT completed)),
+            toInt64(quantileExactIf(0.5)(booking_revenue, completed)),
+            (
+                SELECT countDistinct(user_id)
+                FROM promotion_touch_events
+                WHERE project_id = {project_id:String}
+                  AND promotion_run_id = {promotion_run_id:String}
+                  AND ad_experiment_id = {ad_experiment_id:String}
+                  AND event_name = 'campaign_redirect_click'
+                  AND event_time <= {evaluation_cutoff_at:DateTime64(3, 'UTC')}
+            )
+        FROM audience
+        """,
+        parameters={
+            "project_id": PROJECT_ID,
+            "promotion_run_id": experiment["promotion_run_id"],
+            "ad_experiment_id": experiment["ad_experiment_id"],
+            "destination_ids": list(_scenario_destinations(scenario)),
+            "evaluation_cutoff_at": cutoff,
+        },
+    )
+    return tuple(int(value) for value in result.result_rows[0])
+
+
+def _load_current_audience_counts(client: Any, now: datetime) -> tuple[int, ...]:
+    result = client.query(
+        """
+        WITH per_user AS (
+            SELECT
+                user_id,
+                countIf(
+                    event_name = 'page_view'
+                    AND JSONExtractString(properties_json, 'age_group') IN ('20대', '30대')
+                ) AS target_age_count,
+                countIf(
+                    event_name = 'hotel_detail_view'
+                    AND lowerUTF8(JSONExtractString(
+                        properties_json,
+                        'destination_id'
+                    )) IN ('jeju', 'okinawa')
+                ) AS destination_detail_count,
+                countIf(event_name = 'booking_start') AS booking_start_count,
+                countIf(event_name = 'booking_complete') AS booking_complete_count
+            FROM raw_events
+            WHERE project_id = {project_id:String}
+              AND validation_status = 'valid'
+              AND startsWith(event_id, {event_prefix:String})
+              AND event_time >= {window_start:DateTime64(3, 'UTC')}
+              AND event_time < {window_end:DateTime64(3, 'UTC')}
+            GROUP BY user_id
+        )
+        SELECT
+            count(),
+            countIf(target_age_count >= 1),
+            countIf(target_age_count >= 1 AND destination_detail_count >= 2),
+            countIf(
+                target_age_count >= 1
+                AND destination_detail_count >= 2
+                AND booking_start_count >= 1
+                AND booking_complete_count = 0
+            )
+        FROM per_user
+        """,
+        parameters={
+            "project_id": PROJECT_ID,
+            "event_prefix": f"{FIXTURE_EVENT_PREFIX}current_",
+            "window_start": now - timedelta(days=30),
+            "window_end": now + timedelta(minutes=1),
+        },
+    )
+    return tuple(int(value) for value in result.result_rows[0])
+
+
 def _ratio(numerator: int, denominator: int) -> float:
     return 0.0 if denominator == 0 else numerator / denominator
+
+
+def _build_seed_audience_intent_analysis(
+    scenario: Scenario,
+    *,
+    counts: tuple[int, ...],
+    actual_value: Decimal,
+) -> dict[str, Any] | None:
+    fixture = scenario.audience_intent_fixture
+    if fixture is None:
+        return None
+
+    response, _, detail, booking_start, booking_complete, _ = counts
+    repeat_rate = Decimal(fixture.repeat_view_booking_count) / Decimal(
+        fixture.repeat_view_user_count
+    )
+    comparison_rate = Decimal(fixture.comparison_booking_count) / Decimal(
+        fixture.comparison_user_count
+    )
+    destination_label = "제주·오키나와"
+    paragraphs = [
+        (
+            f"목표 예약 전환율은 {scenario.target_value * 100:.1f}%였지만 실제 "
+            f"전환율은 {actual_value * 100:.1f}%였습니다. 광고 반응 고객 "
+            f"{response}명이 링크를 눌렀고 {detail}명이 숙소 상세까지 확인했기 "
+            "때문에 여행지와 프로모션에 대한 관심은 확인됐습니다."
+        ),
+        (
+            f"하지만 예약을 시작한 {booking_start}명 중 {booking_complete}명만 "
+            "예약을 완료했습니다. 가장 큰 이탈은 예약 시작과 완료 사이에서 "
+            "발생했습니다."
+        ),
+        (
+            "초기 고객군은 제주·오키나와 관심 고객을 확보한다는 점에서는 "
+            f"합리적이었습니다. 다만 숙소를 반복 조회한 고객의 전환율은 "
+            f"{repeat_rate * 100:.1f}%, 일회성 또는 과거 조회 고객은 "
+            f"{comparison_rate * 100:.1f}%로 현재 예약 의도에 차이가 있었습니다."
+        ),
+        (
+            "또한 예약 이탈 고객이 선택한 숙소 총액의 중앙값은 "
+            f"{fixture.booking_abandon_median_revenue:,.0f}원으로 예약 완료 고객의 "
+            f"{fixture.booking_complete_median_revenue:,.0f}원보다 높았습니다. "
+            "성수기 숙박 총액이나 취소 조건이 최종 결정에 부담이 되었을 "
+            "가능성이 있습니다."
+        ),
+        (
+            f"다음 실험에서는 {destination_label} 숙소를 반복해서 확인하고 "
+            "예약 단계까지 진입한 고객을 별도로 검증해 보세요."
+        ),
+    ]
+    return {
+        "version": "dec.audience-intent-analysis.v1",
+        "title": "초기 고객군 안에서 현재 예약 의도의 차이가 확인됐습니다",
+        "paragraphs": paragraphs,
+        "cohort_comparison": {
+            "lookback_days": 30,
+            "repeat_detail_minimum_count": 2,
+            "repeat_view_user_count": fixture.repeat_view_user_count,
+            "repeat_view_booking_count": fixture.repeat_view_booking_count,
+            "repeat_view_conversion_rate": str(repeat_rate),
+            "comparison_user_count": fixture.comparison_user_count,
+            "comparison_booking_count": fixture.comparison_booking_count,
+            "comparison_conversion_rate": str(comparison_rate),
+        },
+        "booking_value_comparison": {
+            "currency": "KRW",
+            "abandoned_user_count": fixture.booking_abandon_user_count,
+            "completed_user_count": fixture.booking_complete_user_count,
+            "abandoned_median_revenue": str(
+                fixture.booking_abandon_median_revenue
+            ),
+            "completed_median_revenue": str(
+                fixture.booking_complete_median_revenue
+            ),
+        },
+        "next_segment_hypothesis": {
+            "lookback_days": 30,
+            "condition_labels": [
+                "20~30대",
+                f"최근 30일 {destination_label} 숙소 상세 2회 이상",
+                "예약 시작 후 미완료",
+            ],
+            "validation_note": (
+                "관측된 행동 차이를 바탕으로 만든 다음 실험 가설이며 성공을 "
+                "보장하지 않습니다."
+            ),
+        },
+    }
 
 
 def _build_diagnosis(
@@ -1378,7 +2006,7 @@ def _build_diagnosis(
             )
     largest_dropoff = max(
         dropoffs,
-        key=lambda item: (item["dropoff_count"], item["dropoff_rate"]),
+        key=lambda item: (item["dropoff_rate"], item["dropoff_count"]),
     )
     actual_value = Decimal(booking_complete) / Decimal(response)
     previous = _previous_scenario(scenario)
@@ -1394,22 +2022,22 @@ def _build_diagnosis(
             Decimal("0.01")
         )
     )
-    status = "goal_met" if actual_value >= TARGET_VALUE else "goal_not_met"
+    status = "goal_met" if actual_value >= scenario.target_value else "goal_not_met"
     gap_percentage_points = max(
-        (TARGET_VALUE - actual_value) * Decimal(100), Decimal(0)
+        (scenario.target_value - actual_value) * Decimal(100), Decimal(0)
     ).quantize(Decimal("0.01"))
     if status == "goal_met":
         if previous is None:
             summary = (
                 f"예약 완료율 {actual_value * 100:.2f}%로 "
-                f"목표 {TARGET_VALUE * 100:.2f}%를 달성했습니다."
+                f"목표 {scenario.target_value * 100:.2f}%를 달성했습니다."
             )
         else:
             summary = (
                 f"{scenario.loop_count}번째 실험에서 '{scenario.change_summary}' 변경안을 "
                 f"적용했습니다. 예약 완료율은 이전 실험 {previous_value * 100:.2f}%에서 "
                 f"{actual_value * 100:.2f}%로 {improvement_percentage_points}%p 개선되어 "
-                f"목표 {TARGET_VALUE * 100:.2f}%를 달성했습니다."
+                f"목표 {scenario.target_value * 100:.2f}%를 달성했습니다."
             )
         bottleneck = "none"
     else:
@@ -1422,7 +2050,7 @@ def _build_diagnosis(
             )
         summary = (
             f"{comparison}예약 완료율 {actual_value * 100:.2f}%로 목표 "
-            f"{TARGET_VALUE * 100:.2f}%보다 {gap_percentage_points}%p 낮습니다. "
+            f"{scenario.target_value * 100:.2f}%보다 {gap_percentage_points}%p 낮습니다. "
             f"가장 큰 관측 이탈은 {largest_dropoff['from_stage_label']}에서 "
             f"{largest_dropoff['to_stage_label']} 단계로 넘어가는 구간으로, "
             f"{largest_dropoff['from_count']}명 중 "
@@ -1436,7 +2064,6 @@ def _build_diagnosis(
         )
     limitations = [
         "동일 광고 실험에 귀속된 유효 이벤트의 고유 사용자만 집계했습니다.",
-        "시연용 과거 캠페인 데이터이며 실제 운영 성과와 섞이지 않습니다.",
     ]
     if bottleneck == "booking_start_to_booking_complete":
         limitations.append(
@@ -1452,7 +2079,7 @@ def _build_diagnosis(
         ),
         (
             f"실제 성과 {actual_value * 100:.2f}% / "
-            f"목표 {TARGET_VALUE * 100:.2f}%"
+            f"목표 {scenario.target_value * 100:.2f}%"
             if status == "goal_met"
             else f"목표 대비 {gap_percentage_points}%p 부족"
         ),
@@ -1466,7 +2093,7 @@ def _build_diagnosis(
             ),
         )
     diagnosis = {
-        "version": "dec.evaluation-diagnosis.v2",
+        "version": "dec.evaluation-diagnosis.v3",
         "status": status,
         "summary": summary,
         "observed_bottleneck": bottleneck,
@@ -1481,6 +2108,11 @@ def _build_diagnosis(
         },
         "limitations": limitations,
         "data_origin": {"kind": "demo_fixture", "label": "시연 데이터"},
+        "audience_intent_analysis": _build_seed_audience_intent_analysis(
+            scenario,
+            counts=counts,
+            actual_value=actual_value,
+        ),
         "experiment_iteration": {
             "loop_count": scenario.loop_count,
             "change_summary": scenario.change_summary,
@@ -1542,7 +2174,7 @@ def _upsert_evaluation(
         },
         "status_reason": status,
         "min_sample_size": MIN_SAMPLE_SIZE,
-        "target_value": str(TARGET_VALUE),
+        "target_value": str(scenario.target_value),
         "actual_value": str(actual_value),
         "numerator_count": numerator_count,
         "denominator_count": denominator_count,
@@ -1594,7 +2226,7 @@ def _upsert_evaluation(
                 scenario.segment_id,
                 scenario.content_id,
                 scenario.content_option_id,
-                TARGET_VALUE,
+                scenario.target_value,
                 actual_value,
                 numerator_count,
                 denominator_count,
@@ -1752,7 +2384,7 @@ def _dashboard_url(scenario: Scenario) -> str:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Create a dedicated historical campaign with six repeat-experiment "
+            "Create a dedicated historical campaign with five repeat-experiment "
             "funnels in LoopAd local or AWS dev."
         )
     )
@@ -1835,8 +2467,10 @@ def main() -> None:
 
         today = datetime.now(KST).date()
         with postgres_connection.transaction():
+            _delete_retired_yeosu_fixture(postgres_connection)
             experiments = _upsert_hierarchy(postgres_connection, today)
 
+        fixture_now = datetime.now(UTC)
         rows = [
             row
             for scenario in SCENARIOS
@@ -1846,6 +2480,7 @@ def main() -> None:
                 write_key,
             )
         ]
+        rows.extend(_current_audience_rows(write_key=write_key, now=fixture_now))
         _replace_clickhouse_fixture(clickhouse_client, rows)
 
         counts_by_scenario: dict[str, tuple[int, ...]] = {}
@@ -1859,6 +2494,41 @@ def main() -> None:
                     f"{scenario.stage_counts}, got {counts[:5]}"
                 )
             counts_by_scenario[scenario.key] = counts
+
+            intent_fixture = scenario.audience_intent_fixture
+            if intent_fixture is not None:
+                intent_counts = _load_intent_fixture_counts(
+                    clickhouse_client,
+                    scenario,
+                    experiment,
+                    cutoff,
+                )
+                expected_intent_counts = (
+                    intent_fixture.repeat_view_user_count,
+                    intent_fixture.repeat_view_booking_count,
+                    intent_fixture.comparison_user_count,
+                    intent_fixture.comparison_booking_count,
+                    intent_fixture.booking_abandon_user_count,
+                    intent_fixture.booking_complete_user_count,
+                    int(intent_fixture.booking_abandon_median_revenue),
+                    int(intent_fixture.booking_complete_median_revenue),
+                    scenario.stage_counts[0],
+                )
+                if intent_counts != expected_intent_counts:
+                    raise RuntimeError(
+                        f"{scenario.key} intent cohort mismatch: expected "
+                        f"{expected_intent_counts}, got {intent_counts}"
+                    )
+
+        current_audience_counts = _load_current_audience_counts(
+            clickhouse_client,
+            fixture_now,
+        )
+        if current_audience_counts != (700, 620, 220, 132):
+            raise RuntimeError(
+                "current Jeju/Okinawa audience mismatch: expected "
+                f"(700, 620, 220, 132), got {current_audience_counts}"
+            )
 
         with postgres_connection.transaction():
             for scenario in SCENARIOS:
@@ -1914,7 +2584,14 @@ def main() -> None:
             )
         print(f"campaign_id={CAMPAIGN_ID}")
         print(f"dashboard_gangneung={_dashboard_url(GANGNEUNG_FAMILY_1)}")
-        print(f"dashboard_yeosu={_dashboard_url(YEOSU_OCEANVIEW_1)}")
+        print(f"dashboard_jeju_okinawa={_dashboard_url(JEJU_OKINAWA_2)}")
+        print(
+            "assistant_jeju_okinawa_counts="
+            f"eligible:{current_audience_counts[0]},"
+            f"age_20_30:{current_audience_counts[1]},"
+            f"repeat_detail:{current_audience_counts[2]},"
+            f"final_incomplete:{current_audience_counts[3]}"
+        )
     finally:
         clickhouse_client.close()
         postgres_connection.close()
