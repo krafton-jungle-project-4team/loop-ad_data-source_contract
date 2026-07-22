@@ -1389,6 +1389,9 @@ SET state = 'released',
     released_at = now()
 WHERE user_id = 'p1_near_user';
 
+SET CONSTRAINTS ALL IMMEDIATE;
+SET CONSTRAINTS ALL DEFERRED;
+
 DO $$
 BEGIN
     IF NOT EXISTS (

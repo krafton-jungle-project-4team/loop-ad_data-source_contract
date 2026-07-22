@@ -2712,6 +2712,7 @@ BEGIN
             WHERE target.allocation_plan_id = p_allocation_plan_id
               AND target.audience_reservation_state <>
                   CASE
+                      WHEN target.status = 'stopped' THEN 'released'
                       WHEN EXISTS (
                           SELECT 1
                           FROM promotion_run_target_bindings AS binding

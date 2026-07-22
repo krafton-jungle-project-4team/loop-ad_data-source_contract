@@ -266,4 +266,142 @@ BEGIN
 END
 $$;
 
+-- A locked plan may keep immutable run bindings after its target is stopped.
+-- The target and exclusion members are released while the plan remains locked
+-- as historical execution provenance.
+CREATE OR REPLACE FUNCTION assert_segment_audience_allocation_plan(
+    p_allocation_plan_id UUID
+)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    plan_row segment_audience_allocation_plans%ROWTYPE;
+    stored_segment_ids JSONB;
+BEGIN
+    SELECT *
+    INTO plan_row
+    FROM segment_audience_allocation_plans
+    WHERE allocation_plan_id = p_allocation_plan_id;
+
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+
+    SELECT jsonb_agg(to_jsonb(segment_id) ORDER BY segment_id COLLATE "C")
+    INTO stored_segment_ids
+    FROM promotion_target_segments
+    WHERE allocation_plan_id = p_allocation_plan_id;
+
+    IF stored_segment_ids IS DISTINCT FROM plan_row.selected_segment_ids_json THEN
+        RAISE EXCEPTION 'allocation plan target set does not match selected segments'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM promotion_target_segments AS target
+        JOIN segment_audience_snapshots AS snapshot
+          ON snapshot.snapshot_id = target.audience_snapshot_id
+        WHERE target.allocation_plan_id = p_allocation_plan_id
+          AND (
+              target.analysis_id <> plan_row.target_analysis_id
+              OR target.promotion_id <> plan_row.promotion_id
+              OR target.project_id <> snapshot.project_id
+              OR target.campaign_id <> snapshot.campaign_id
+              OR target.promotion_id <> snapshot.promotion_id
+              OR target.segment_id <> snapshot.segment_id
+              OR snapshot.snapshot_kind <> 'final'
+              OR snapshot.allocation_plan_id <> p_allocation_plan_id
+          )
+    ) THEN
+        RAISE EXCEPTION 'allocation plan target identity mismatch'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF plan_row.status = 'finalized' THEN
+        IF EXISTS (
+            SELECT 1
+            FROM promotion_target_segments
+            WHERE allocation_plan_id = p_allocation_plan_id
+              AND audience_reservation_state <> 'reserved'
+        ) OR EXISTS (
+            SELECT 1
+            FROM promotion_run_target_bindings
+            WHERE allocation_plan_id = p_allocation_plan_id
+        ) THEN
+            RAISE EXCEPTION 'finalized plan must contain only reserved targets'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF plan_row.status = 'locked' THEN
+        IF NOT EXISTS (
+            SELECT 1
+            FROM promotion_run_target_bindings
+            WHERE allocation_plan_id = p_allocation_plan_id
+        ) OR EXISTS (
+            SELECT 1
+            FROM promotion_target_segments AS target
+            WHERE target.allocation_plan_id = p_allocation_plan_id
+              AND target.audience_reservation_state <>
+                  CASE
+                      WHEN target.status = 'stopped' THEN 'released'
+                      WHEN EXISTS (
+                          SELECT 1
+                          FROM promotion_run_target_bindings AS binding
+                          WHERE binding.target_analysis_id = target.analysis_id
+                            AND binding.segment_id = target.segment_id
+                      ) THEN 'consumed'
+                      ELSE 'reserved'
+                  END
+        ) THEN
+            RAISE EXCEPTION 'locked plan target states must match run bindings'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSE
+        IF EXISTS (
+            SELECT 1
+            FROM promotion_run_target_bindings
+            WHERE allocation_plan_id = p_allocation_plan_id
+        ) OR EXISTS (
+            SELECT 1
+            FROM promotion_target_segments
+            WHERE allocation_plan_id = p_allocation_plan_id
+              AND audience_reservation_state <> 'released'
+        ) THEN
+            RAISE EXCEPTION 'released plan must release every unbound target'
+                USING ERRCODE = '23514';
+        END IF;
+
+        IF EXISTS (
+            SELECT 1
+            FROM promotion_audience_exclusion_members
+            WHERE allocation_plan_id = p_allocation_plan_id
+              AND state IN ('reserved', 'consumed')
+        ) THEN
+            RAISE EXCEPTION 'released plan may not retain active exclusions'
+                USING ERRCODE = '23514';
+        END IF;
+    END IF;
+
+    IF plan_row.status <> 'released' AND EXISTS (
+        SELECT 1
+        FROM promotion_target_segments AS target
+        JOIN segment_audience_snapshots AS snapshot
+          ON snapshot.snapshot_id = target.audience_snapshot_id
+        WHERE target.allocation_plan_id = p_allocation_plan_id
+          AND (
+              SELECT count(*)
+              FROM promotion_audience_exclusion_members AS excluded
+              WHERE excluded.allocation_plan_id = p_allocation_plan_id
+                AND excluded.segment_id = target.segment_id
+                AND excluded.final_snapshot_id = target.audience_snapshot_id
+                AND excluded.state = target.audience_reservation_state
+          ) <> snapshot.final_user_count
+    ) THEN
+        RAISE EXCEPTION 'allocation plan exclusion member count mismatch'
+            USING ERRCODE = '23514';
+    END IF;
+END
+$$;
+
 COMMIT;
