@@ -375,10 +375,13 @@ JEJU_OKINAWA_2 = replace(
     ),
 )
 
-SCENARIOS = (
+RETIRED_SCENARIOS = (
     BUSAN_WEEKDAY,
     GANGNEUNG_FAMILY_1,
     GANGNEUNG_FAMILY_2,
+)
+
+SCENARIOS = (
     JEJU_OKINAWA_1,
     JEJU_OKINAWA_2,
 )
@@ -523,19 +526,154 @@ def _goal_snapshot(scenario: Scenario) -> dict[str, Any]:
     return snapshot
 
 
-def _delete_retired_yeosu_fixture(
+def _delete_retired_scenario_fixtures(
     connection: psycopg.Connection[Any],
 ) -> None:
-    promotion_ids = [RETIRED_YEOSU_PROMOTION_ID]
-    run_ids = list(RETIRED_YEOSU_RUN_IDS)
-    experiment_ids = list(RETIRED_YEOSU_EXPERIMENT_IDS)
-    evaluation_ids = list(RETIRED_YEOSU_EVALUATION_IDS)
-    analysis_ids = list(RETIRED_YEOSU_ANALYSIS_IDS)
-    generation_ids = list(RETIRED_YEOSU_GENERATION_IDS)
-    content_ids = list(RETIRED_YEOSU_CONTENT_IDS)
-    segment_ids = list(RETIRED_YEOSU_SEGMENT_IDS)
+    promotion_ids = sorted(
+        {RETIRED_YEOSU_PROMOTION_ID}
+        | {scenario.promotion_id for scenario in RETIRED_SCENARIOS}
+    )
+    run_ids = sorted(
+        set(RETIRED_YEOSU_RUN_IDS)
+        | {scenario.promotion_run_id for scenario in RETIRED_SCENARIOS}
+    )
+    experiment_ids = sorted(
+        set(RETIRED_YEOSU_EXPERIMENT_IDS)
+        | {scenario.ad_experiment_id for scenario in RETIRED_SCENARIOS}
+    )
+    evaluation_ids = sorted(
+        set(RETIRED_YEOSU_EVALUATION_IDS)
+        | {scenario.evaluation_id for scenario in RETIRED_SCENARIOS}
+    )
+    analysis_ids = sorted(
+        set(RETIRED_YEOSU_ANALYSIS_IDS)
+        | {scenario.analysis_id for scenario in RETIRED_SCENARIOS}
+    )
+    generation_ids = sorted(
+        set(RETIRED_YEOSU_GENERATION_IDS)
+        | {scenario.generation_id for scenario in RETIRED_SCENARIOS}
+    )
+    content_ids = sorted(
+        set(RETIRED_YEOSU_CONTENT_IDS)
+        | {scenario.content_id for scenario in RETIRED_SCENARIOS}
+    )
+    segment_ids = sorted(
+        set(RETIRED_YEOSU_SEGMENT_IDS)
+        | {scenario.segment_id for scenario in RETIRED_SCENARIOS}
+    )
 
     with connection.cursor(row_factory=dict_row) as cursor:
+        cursor.execute(
+            """
+            SELECT promotion_run_id
+            FROM promotion_runs
+            WHERE promotion_id = ANY(%s)
+            """,
+            (promotion_ids,),
+        )
+        run_ids = sorted(
+            set(run_ids)
+            | {str(row["promotion_run_id"]) for row in cursor.fetchall()}
+        )
+        cursor.execute(
+            """
+            SELECT ad_experiment_id
+            FROM ad_experiments
+            WHERE promotion_id = ANY(%s)
+            """,
+            (promotion_ids,),
+        )
+        experiment_ids = sorted(
+            set(experiment_ids)
+            | {str(row["ad_experiment_id"]) for row in cursor.fetchall()}
+        )
+        cursor.execute(
+            """
+            SELECT evaluation_id
+            FROM promotion_evaluations
+            WHERE promotion_id = ANY(%s)
+            """,
+            (promotion_ids,),
+        )
+        evaluation_ids = sorted(
+            set(evaluation_ids)
+            | {str(row["evaluation_id"]) for row in cursor.fetchall()}
+        )
+        cursor.execute(
+            """
+            SELECT analysis_id
+            FROM promotion_analyses
+            WHERE promotion_id = ANY(%s)
+            """,
+            (promotion_ids,),
+        )
+        analysis_ids = sorted(
+            set(analysis_ids)
+            | {str(row["analysis_id"]) for row in cursor.fetchall()}
+        )
+        cursor.execute(
+            """
+            SELECT generation_id
+            FROM generation_runs
+            WHERE promotion_id = ANY(%s)
+            """,
+            (promotion_ids,),
+        )
+        generation_ids = sorted(
+            set(generation_ids)
+            | {str(row["generation_id"]) for row in cursor.fetchall()}
+        )
+        cursor.execute(
+            """
+            SELECT content_id
+            FROM content_candidates
+            WHERE promotion_id = ANY(%s)
+            """,
+            (promotion_ids,),
+        )
+        content_ids = sorted(
+            set(content_ids)
+            | {str(row["content_id"]) for row in cursor.fetchall()}
+        )
+        cursor.execute(
+            """
+            SELECT segment_id
+            FROM segment_audience_snapshots
+            WHERE promotion_id = ANY(%s)
+            UNION
+            SELECT segment_id
+            FROM promotion_segment_suggestions
+            WHERE promotion_id = ANY(%s)
+            UNION
+            SELECT segment_id
+            FROM promotion_target_segments
+            WHERE promotion_id = ANY(%s)
+            UNION
+            SELECT segment_id
+            FROM ad_experiments
+            WHERE promotion_id = ANY(%s)
+            UNION
+            SELECT segment_id
+            FROM content_candidates
+            WHERE promotion_id = ANY(%s)
+            """,
+            (
+                promotion_ids,
+                promotion_ids,
+                promotion_ids,
+                promotion_ids,
+                promotion_ids,
+            ),
+        )
+        segment_ids = sorted(
+            set(segment_ids)
+            | {
+                str(row["segment_id"])
+                for row in cursor.fetchall()
+                if row["segment_id"] is not None
+            }
+        )
+
         cursor.execute(
             """
             SELECT
@@ -549,10 +687,15 @@ def _delete_retired_yeosu_fixture(
             (promotion_ids, promotion_ids, run_ids),
         )
         blockers = cursor.fetchone()
-        if blockers is not None and any(int(value) > 0 for value in blockers.values()):
+        immutable_blockers = {
+            key: int(value)
+            for key, value in (blockers or {}).items()
+            if key != "snapshot_count" and int(value) > 0
+        }
+        if immutable_blockers:
             raise RuntimeError(
-                "retired Yeosu fixture has immutable V2 audience or uplift records: "
-                f"{dict(blockers)}"
+                "retired historical fixture has immutable V2 audience or uplift records: "
+                f"{immutable_blockers}"
             )
 
         cursor.execute(
@@ -589,24 +732,38 @@ def _delete_retired_yeosu_fixture(
             SET parent_ad_experiment_id = NULL,
                 source_evaluation_id = NULL
             WHERE ad_experiment_id = ANY(%s)
+               OR parent_ad_experiment_id = ANY(%s)
+               OR source_evaluation_id = ANY(%s)
             """,
-            (experiment_ids,),
+            (experiment_ids, experiment_ids, evaluation_ids),
         )
         cursor.execute(
-            "DELETE FROM promotion_evaluations WHERE evaluation_id = ANY(%s)",
-            (evaluation_ids,),
+            """
+            DELETE FROM promotion_evaluations
+            WHERE promotion_id = ANY(%s)
+               OR evaluation_id = ANY(%s)
+            """,
+            (promotion_ids, evaluation_ids),
         )
         cursor.execute(
-            "DELETE FROM ad_experiments WHERE ad_experiment_id = ANY(%s)",
-            (experiment_ids,),
+            """
+            DELETE FROM ad_experiments
+            WHERE promotion_id = ANY(%s)
+               OR ad_experiment_id = ANY(%s)
+            """,
+            (promotion_ids, experiment_ids),
         )
         cursor.execute(
             "DELETE FROM promotion_run_target_bindings WHERE promotion_run_id = ANY(%s)",
             (run_ids,),
         )
         cursor.execute(
-            "DELETE FROM promotion_runs WHERE promotion_run_id = ANY(%s)",
-            (run_ids,),
+            """
+            DELETE FROM promotion_runs
+            WHERE promotion_id = ANY(%s)
+               OR promotion_run_id = ANY(%s)
+            """,
+            (promotion_ids, run_ids),
         )
         cursor.execute(
             "DELETE FROM promotion_audience_exclusion_members WHERE promotion_id = ANY(%s)",
@@ -625,16 +782,47 @@ def _delete_retired_yeosu_fixture(
             (promotion_ids,),
         )
         cursor.execute(
-            "DELETE FROM content_candidates WHERE content_id = ANY(%s)",
-            (content_ids,),
+            """
+            DELETE FROM segment_audience_members
+            WHERE snapshot_id IN (
+                SELECT snapshot_id
+                FROM segment_audience_snapshots
+                WHERE promotion_id = ANY(%s)
+            )
+            """,
+            (promotion_ids,),
         )
         cursor.execute(
-            "DELETE FROM generation_runs WHERE generation_id = ANY(%s)",
-            (generation_ids,),
+            "DELETE FROM segment_audience_snapshots WHERE promotion_id = ANY(%s)",
+            (promotion_ids,),
         )
         cursor.execute(
-            "DELETE FROM promotion_analyses WHERE analysis_id = ANY(%s)",
-            (analysis_ids,),
+            "DELETE FROM segment_vectors WHERE segment_id = ANY(%s)",
+            (segment_ids,),
+        )
+        cursor.execute(
+            """
+            DELETE FROM content_candidates
+            WHERE promotion_id = ANY(%s)
+               OR content_id = ANY(%s)
+            """,
+            (promotion_ids, content_ids),
+        )
+        cursor.execute(
+            """
+            DELETE FROM generation_runs
+            WHERE promotion_id = ANY(%s)
+               OR generation_id = ANY(%s)
+            """,
+            (promotion_ids, generation_ids),
+        )
+        cursor.execute(
+            """
+            DELETE FROM promotion_analyses
+            WHERE promotion_id = ANY(%s)
+               OR analysis_id = ANY(%s)
+            """,
+            (promotion_ids, analysis_ids),
         )
         cursor.execute(
             "DELETE FROM segment_definitions WHERE segment_id = ANY(%s)",
@@ -773,8 +961,8 @@ def _upsert_hierarchy(
                 PROJECT_ID,
                 CAMPAIGN_NAME,
                 (
-                    "부산·강릉·제주·오키나와 숙박에 관심을 보인 기존 고객에게 지역별 "
-                    "혜택을 제안해 예약 전환율을 높입니다."
+                    "제주·오키나와 숙박에 관심을 보인 기존 고객의 현재 예약 의도 차이를 "
+                    "검증해 예약 전환율을 높입니다."
                 ),
                 campaign_start,
                 campaign_end,
@@ -2367,6 +2555,47 @@ def _verify_postgres(
         return [dict(row) for row in cursor.fetchall()]
 
 
+def _verify_campaign_scope(connection: psycopg.Connection[Any]) -> None:
+    expected_promotion_ids = {scenario.promotion_id for scenario in SCENARIOS}
+    expected_experiment_ids = {scenario.ad_experiment_id for scenario in SCENARIOS}
+    with connection.cursor(row_factory=dict_row) as cursor:
+        cursor.execute(
+            """
+            SELECT promotion_id
+            FROM promotions
+            WHERE project_id = %s
+              AND campaign_id = %s
+            """,
+            (PROJECT_ID, CAMPAIGN_ID),
+        )
+        actual_promotion_ids = {
+            str(row["promotion_id"]) for row in cursor.fetchall()
+        }
+        cursor.execute(
+            """
+            SELECT ad_experiment_id
+            FROM ad_experiments
+            WHERE project_id = %s
+              AND campaign_id = %s
+            """,
+            (PROJECT_ID, CAMPAIGN_ID),
+        )
+        actual_experiment_ids = {
+            str(row["ad_experiment_id"]) for row in cursor.fetchall()
+        }
+
+    if actual_promotion_ids != expected_promotion_ids:
+        raise RuntimeError(
+            "historical campaign promotion scope mismatch: expected "
+            f"{sorted(expected_promotion_ids)}, got {sorted(actual_promotion_ids)}"
+        )
+    if actual_experiment_ids != expected_experiment_ids:
+        raise RuntimeError(
+            "historical campaign experiment scope mismatch: expected "
+            f"{sorted(expected_experiment_ids)}, got {sorted(actual_experiment_ids)}"
+        )
+
+
 def _dashboard_url(scenario: Scenario) -> str:
     query = urlencode(
         {
@@ -2384,8 +2613,8 @@ def _dashboard_url(scenario: Scenario) -> str:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Create a dedicated historical campaign with five repeat-experiment "
-            "funnels in LoopAd local or AWS dev."
+            "Create a dedicated Jeju/Okinawa historical campaign with two "
+            "repeat-experiment funnels in LoopAd local or AWS dev."
         )
     )
     parser.add_argument(
@@ -2467,7 +2696,7 @@ def main() -> None:
 
         today = datetime.now(KST).date()
         with postgres_connection.transaction():
-            _delete_retired_yeosu_fixture(postgres_connection)
+            _delete_retired_scenario_fixtures(postgres_connection)
             experiments = _upsert_hierarchy(postgres_connection, today)
 
         fixture_now = datetime.now(UTC)
@@ -2541,6 +2770,7 @@ def main() -> None:
             _upsert_repeat_lineage(postgres_connection, experiments)
 
         verified = _verify_postgres(postgres_connection)
+        _verify_campaign_scope(postgres_connection)
         if len(verified) != len(SCENARIOS):
             raise RuntimeError(
                 f"expected {len(SCENARIOS)} verified experiments, found {len(verified)}"
@@ -2583,7 +2813,6 @@ def main() -> None:
                 f"status={row['evaluation_status']}"
             )
         print(f"campaign_id={CAMPAIGN_ID}")
-        print(f"dashboard_gangneung={_dashboard_url(GANGNEUNG_FAMILY_1)}")
         print(f"dashboard_jeju_okinawa={_dashboard_url(JEJU_OKINAWA_2)}")
         print(
             "assistant_jeju_okinawa_counts="
