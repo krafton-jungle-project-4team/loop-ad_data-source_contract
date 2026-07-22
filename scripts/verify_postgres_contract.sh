@@ -212,6 +212,12 @@ for _ in 1 2; do
         "${ROOT_DIR}/postgres/expand_segment_target_cascade_release_v1.sql"
 done
 
+for _ in 1 2; do
+    psql_file \
+        "${FRESH_DB}" \
+        "${ROOT_DIR}/postgres/expand_segment_target_cascade_release_v2.sql"
+done
+
 assert_query "${FRESH_DB}" "
 SELECT (
     project_id IS NULL
@@ -342,6 +348,12 @@ for _ in 1 2; do
     psql_file \
         "${AUDIENCE_LEGACY_DB}" \
         "${ROOT_DIR}/postgres/expand_segment_target_cascade_release_v1.sql"
+done
+
+for _ in 1 2; do
+    psql_file \
+        "${AUDIENCE_LEGACY_DB}" \
+        "${ROOT_DIR}/postgres/expand_segment_target_cascade_release_v2.sql"
 done
 
 audience_legacy_fingerprint_after="$(psql_query "${AUDIENCE_LEGACY_DB}" "
@@ -493,6 +505,12 @@ for _ in 1 2; do
     psql_file \
         "${UPLIFT_LEGACY_DB}" \
         "${ROOT_DIR}/postgres/expand_segment_target_cascade_release_v1.sql"
+done
+
+for _ in 1 2; do
+    psql_file \
+        "${UPLIFT_LEGACY_DB}" \
+        "${ROOT_DIR}/postgres/expand_segment_target_cascade_release_v2.sql"
 done
 
 psql_file \
