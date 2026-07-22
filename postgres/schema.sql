@@ -2285,6 +2285,23 @@ BEGIN
         RETURN NEW;
     END IF;
 
+    IF OLD.status = 'locked' AND NEW.status = 'released' THEN
+        IF EXISTS (
+            SELECT 1
+            FROM promotion_target_segments target
+            WHERE target.allocation_plan_id = NEW.allocation_plan_id
+              AND (
+                  target.status <> 'stopped'
+                  OR target.audience_reservation_state <> 'released'
+              )
+        ) THEN
+            RAISE EXCEPTION
+                'locked allocation plan still has an active target'
+                USING ERRCODE = '55000';
+        END IF;
+        RETURN NEW;
+    END IF;
+
     RAISE EXCEPTION 'invalid allocation plan transition: % -> %',
         OLD.status, NEW.status
         USING ERRCODE = '55000';
@@ -2338,6 +2355,12 @@ BEGIN
         RETURN NEW;
     END IF;
 
+    IF OLD.audience_reservation_state = 'consumed'
+       AND NEW.audience_reservation_state = 'released'
+       AND NEW.status = 'stopped' THEN
+        RETURN NEW;
+    END IF;
+
     RAISE EXCEPTION 'invalid target reservation transition: % -> %',
         OLD.audience_reservation_state,
         NEW.audience_reservation_state
@@ -2358,6 +2381,8 @@ DECLARE
     current_revision BIGINT;
     target_project_id VARCHAR(100);
     target_promotion_id VARCHAR(100);
+    target_status VARCHAR(50);
+    previous_target_status VARCHAR(50);
 BEGIN
     IF TG_OP = 'DELETE' THEN
         RAISE EXCEPTION 'promotion audience exclusion members are retained'
@@ -2376,11 +2401,13 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
 
-    SELECT project_id, promotion_id
-    INTO target_project_id, target_promotion_id
+    SELECT project_id, promotion_id, status
+    INTO target_project_id, target_promotion_id, target_status
     FROM promotion_target_segments
     WHERE analysis_id = NEW.target_analysis_id
-      AND segment_id = NEW.segment_id;
+      AND segment_id = NEW.segment_id
+      AND allocation_plan_id = NEW.allocation_plan_id
+      AND audience_snapshot_id = NEW.final_snapshot_id;
 
     IF ROW(NEW.project_id, NEW.promotion_id)
        IS DISTINCT FROM ROW(target_project_id, target_promotion_id) THEN
@@ -2430,6 +2457,45 @@ BEGIN
 
     IF OLD.state = 'released' AND NEW.state = 'reserved' THEN
         RETURN NEW;
+    END IF;
+
+    IF OLD.state = 'consumed' AND NEW.state = 'released' THEN
+        IF target_status <> 'stopped' THEN
+            RAISE EXCEPTION
+                'consumed exclusion can be released only for a stopped target'
+                USING ERRCODE = '55000';
+        END IF;
+        IF ROW(
+            OLD.target_analysis_id,
+            OLD.segment_id,
+            OLD.allocation_plan_id,
+            OLD.final_snapshot_id,
+            OLD.reserved_at
+        ) IS DISTINCT FROM ROW(
+            NEW.target_analysis_id,
+            NEW.segment_id,
+            NEW.allocation_plan_id,
+            NEW.final_snapshot_id,
+            NEW.reserved_at
+        ) THEN
+            RAISE EXCEPTION 'consumed reservation binding is immutable'
+                USING ERRCODE = '55000';
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    IF OLD.state IN ('reserved', 'consumed') AND NEW.state = 'reserved' THEN
+        SELECT status
+        INTO previous_target_status
+        FROM promotion_target_segments
+        WHERE analysis_id = OLD.target_analysis_id
+          AND segment_id = OLD.segment_id
+          AND allocation_plan_id = OLD.allocation_plan_id
+          AND audience_snapshot_id = OLD.final_snapshot_id;
+
+        IF previous_target_status = 'stopped' THEN
+            RETURN NEW;
+        END IF;
     END IF;
 
     RAISE EXCEPTION 'invalid exclusion transition: % -> %',

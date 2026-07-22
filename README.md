@@ -198,6 +198,16 @@ psql -X -v ON_ERROR_STOP=1 \
   -f postgres/expand_uplift_ready_assignment_v1.sql
 ```
 
+실험까지 진행한 스냅샷 고객군을 삭제할 때 과거 실험 이력은 보존하면서
+발송·실험을 중지하고 활성 고객 예약을 해제하려면 Dashboard 배포 전에 다음
+재실행 가능한 확장 migration을 적용합니다.
+
+```bash
+psql -X -v ON_ERROR_STOP=1 \
+  "$DATABASE_URL" \
+  -f postgres/expand_segment_target_cascade_release_v1.sql
+```
+
 `promotion_runs.goal_snapshot_json`의 `outcome_spec`, `outcome_spec_hash`,
 `outcome_definition_version`은 run 생성 이후 변경할 수 없습니다. 기존 run처럼 해당
 필드가 없는 legacy row는 그대로 유지되며 Uplift 학습 대상이 아닙니다.

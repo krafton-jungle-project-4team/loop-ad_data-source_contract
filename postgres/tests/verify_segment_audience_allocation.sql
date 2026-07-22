@@ -1366,4 +1366,50 @@ BEGIN
 END
 $$;
 
+-- Once the target is stopped, its consumed reservation may be released while
+-- run bindings and the other target's history remain intact.
+UPDATE promotion_target_segments
+SET status = 'stopped',
+    audience_reservation_state = 'released'
+WHERE analysis_id = 'analysis_sms_a1'
+  AND segment_id = 'seg_near_checkin';
+
+SELECT advance_promotion_audience_exclusion_revision(
+    'promo_expedia_sms_near_checkin'
+);
+
+UPDATE promotion_audience_exclusion_members
+SET state = 'released',
+    revision = (
+        SELECT revision
+        FROM promotion_audience_exclusion_state
+        WHERE promotion_id = 'promo_expedia_sms_near_checkin'
+    ),
+    consumed_at = NULL,
+    released_at = now()
+WHERE user_id = 'p1_near_user';
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM promotion_run_target_bindings
+        WHERE target_analysis_id = 'analysis_sms_a1'
+          AND segment_id = 'seg_near_checkin'
+    ) OR NOT EXISTS (
+        SELECT 1
+        FROM segment_audience_allocation_plans
+        WHERE allocation_plan_id = '11111111-1111-4111-8111-111111111111'
+          AND status = 'locked'
+    ) OR NOT EXISTS (
+        SELECT 1
+        FROM promotion_audience_exclusion_members
+        WHERE user_id = 'p1_near_user'
+          AND state = 'released'
+    ) THEN
+        RAISE EXCEPTION 'stopped target cascade release did not preserve history';
+    END IF;
+END
+$$;
+
 ROLLBACK;
