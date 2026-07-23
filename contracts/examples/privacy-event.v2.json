@@ -1,0 +1,24 @@
+{
+  "envelope_version": "privacy-event.v2",
+  "project_id": "demo_project",
+  "schema_version": "hotel_rec_promo.v1",
+  "event_id": "evt_private_001",
+  "event_name": "hotel_search",
+  "event_time": "2026-07-23T10:00:00Z",
+  "source": "private_connector",
+  "subject_id": "sub_15d6d4bda1882ae636a857db0c4932223a8d321d8020374cf9edcbb71f5e2963",
+  "identity_namespace": "hotel-customer",
+  "identity_key_version": "key-v1",
+  "session_id": null,
+  "consent": {
+    "status": "granted",
+    "policy_version": "privacy-policy.v1",
+    "purpose_ids": [
+      "personalized_marketing"
+    ]
+  },
+  "properties": {
+    "destination_id": "jeju",
+    "checkin_month": 8
+  }
+}
