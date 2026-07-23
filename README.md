@@ -4,6 +4,16 @@ LoopAd의 로컬 데이터 소스 계약을 공유하는 최소 repo입니다.
 
 이 repo는 운영 migration history를 관리하지 않습니다. 현재 기준 파일은 호텔 예약 프로모션 도메인의 PostgreSQL 운영 스키마와 ClickHouse `hotel_rec_promo.v1` 분석 스키마입니다.
 
+## Experimental privacy event contract
+
+고객사 내부 Connector가 원본 식별자를 가명처리한 뒤 전송하는 비배포 PoC 계약은
+[`docs/privacy_event_contract.md`](docs/privacy_event_contract.md)에 정리되어 있습니다.
+운영 스키마에는 자동 적용되지 않으며 다음 명령으로 계약 예시를 확인할 수 있습니다.
+
+```bash
+python3 scripts/verify_privacy_event_contract.py
+```
+
 ## 구조
 
 ```text
