@@ -113,6 +113,41 @@ python3 scripts/seed_demo_historical_campaign.py --apply
 
 PostgreSQL의 `assignment_source = 'fixture'`, ClickHouse의 `source = 'fixture'`, 평가의 `diagnosis.data_origin.kind = 'demo_fixture'`로 실제 운영 데이터와 구분합니다. 이 시드는 local/AWS dev 시연 전용이며 운영 migration 목록에는 포함하지 않습니다.
 
+### 제주·오키나와 고가 예약 이탈 시연 fixture
+
+`제주, 오키나와 블랙 프라이데이` 프로모션의 활성 행동 벡터 사용자 중 아래 조건에 정확히 103명이 일치하도록 최근 이벤트를 구성합니다.
+
+시연 숙소 목록은
+`https://demo-shoppingmall.dev.loop-ad.org/search?deal=summer-lastcall`의 다음 4개로
+고정합니다.
+
+```text
+Jeju Ocean Breeze Resort  jeju-ocean-breeze-006       기존 프로모션가 278,000원
+Chatan Sunset Bay Resort  okinawa-chatan-sunset-018   기존 프로모션가 318,000원
+Naha Island Terrace       okinawa-naha-terrace-017    기존 프로모션가 232,000원
+Aewol Sunset Villa        jeju-aewol-sunset-007       기존 프로모션가 214,000원
+```
+
+```text
+최근 7일
+20·30대
+선택된 제주·오키나와 프로모션 숙소
+1박 가격 20만 원 초과
+예약 시작 후 미완료
+```
+
+새 사용자를 만들지 않고 활성 `user_behavior_vector_search` 사용자를 재사용하므로 챗봇 조회와 고객군 확정이 같은 모집단을 사용합니다. 이벤트에는 기존 `booking_start.properties.price`를 문자열 원화 금액으로 저장하며 별도의 예약자 정보 입력 이벤트를 추가하지 않습니다. 두 과거 실험 평가에서는 기존 예약 의도 분석을 제거하고, 높은 1박 가격대와 예약 이탈의 관측 관계를 원인 가설로 표시합니다.
+
+```bash
+python3 scripts/seed_demo_jeju_high_price_abandonment.py --target local
+python3 scripts/seed_demo_jeju_high_price_abandonment.py --target local --apply
+
+python3 scripts/seed_demo_jeju_high_price_abandonment.py
+python3 scripts/seed_demo_jeju_high_price_abandonment.py --apply
+```
+
+시드는 고정 event prefix와 fixture marker만 교체합니다. 적용 후 대상 쿼리가 103명인지, 전원이 활성 행동 벡터 generation에 포함되는지 검증하며 조건이 어긋나면 평가 JSON을 갱신하지 않고 실패합니다.
+
 ## 현재 계약 요약
 
 PostgreSQL은 `Campaign -> Promotion -> Segment -> Ad Experiment` 실행 상태를 저장하며, ANN segment matching을 위해 `pgvector` extension을 사용합니다. 핵심 테이블은 `campaigns`, `promotions`, `promotion_analyses`, `promotion_target_segments`, `generation_runs`, `content_candidates`, `promotion_runs`, `ad_experiments`, `promotion_evaluations`, `next_loop_preparations`, `user_segment_assignments`, `segment_query_previews`, `segment_definitions`입니다.
